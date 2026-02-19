@@ -410,6 +410,9 @@ class AgentLoop:
         await self._connect_mcp()
         logger.info("Agent loop started (concurrent session processing enabled)")
 
+        # Resume interrupted sessions after restart
+        await self._resume_interrupted_sessions()
+
         tasks: set[asyncio.Task] = set()
 
         while self._running:
@@ -568,6 +571,68 @@ class AgentLoop:
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
     
+    async def _resume_interrupted_sessions(self) -> None:
+        """Detect sessions interrupted by restart and resume them.
+
+        A session is considered interrupted if its last message is a ``tool``
+        result or an ``assistant`` message with ``tool_calls`` — meaning the
+        agent was mid-loop when the process was killed.
+
+        For each interrupted session we inject a synthetic user message asking
+        the agent to continue, which re-enters the normal message flow.
+        """
+        resumed = 0
+        for path in self.sessions.sessions_dir.glob("*.jsonl"):
+            stem = path.stem  # e.g. "feishu_ou_xxx"
+            if stem == "cli_direct" or not stem:
+                continue
+            parts = stem.split("_", 1)
+            if len(parts) != 2:
+                continue
+            channel, chat_id = parts
+
+            # Skip non-user sessions (cron, heartbeat, subagent)
+            if channel in ("cron", "heartbeat", "system"):
+                continue
+
+            session_key = f"{channel}:{chat_id}"
+            session = self.sessions.get_or_create(session_key)
+            if not session.messages:
+                continue
+
+            last_msg = session.messages[-1]
+            last_role = last_msg.get("role")
+
+            # Interrupted: last message is tool result (agent was about to call LLM again)
+            # or assistant with tool_calls (tool execution was interrupted)
+            is_interrupted = (
+                last_role == "tool"
+                or (last_role == "assistant" and last_msg.get("tool_calls"))
+            )
+
+            if not is_interrupted:
+                continue
+
+            logger.info(f"Resuming interrupted session: {session_key} (last_role={last_role})")
+
+            # Inject a resume message through the bus
+            resume_msg = InboundMessage(
+                channel=channel,
+                sender_id="system",
+                chat_id=chat_id,
+                content=(
+                    "[SYSTEM: The bot process was restarted while you were working. "
+                    "Continue where you left off. Check the conversation history above "
+                    "for context. If you were in the middle of a task, resume it. "
+                    "Briefly tell the user what happened and continue.]"
+                ),
+            )
+            await self.bus.publish_inbound(resume_msg)
+            resumed += 1
+
+        if resumed:
+            logger.info(f"Resumed {resumed} interrupted session(s)")
+
     def _build_status(self, session_key: str, session: Session) -> str:
         """Build a status report string for the /status command."""
         import time as _time
