@@ -420,6 +420,18 @@ def gateway(
             await cron.start()
             await heartbeat.start()
 
+            # Auto-resume interrupted subagent tasks
+            async def _auto_resume_subagents():
+                await asyncio.sleep(5)  # Wait for channels to be ready
+                try:
+                    resumed = await agent.subagents.auto_resume()
+                    if resumed:
+                        console.print(f"[green]✓[/green] Auto-resumed {resumed} subagent task(s)")
+                except Exception as e:
+                    console.print(f"[yellow]⚠[/yellow] Failed to auto-resume subagents: {e}")
+
+            _resume_task = asyncio.create_task(_auto_resume_subagents())
+
             # Send startup notification if configured
             notify = config.gateway.startup_notify
             if notify.enabled:

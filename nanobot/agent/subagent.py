@@ -245,6 +245,26 @@ class SubagentManager:
         """Return the number of currently running subagents."""
         return len(self._running_tasks)
 
+    async def auto_resume(self) -> int:
+        """Resume all tasks that were running when the process last exited.
+
+        Called at gateway startup.  Returns the number of tasks resumed.
+        """
+        resumed = 0
+        for task_id, entry in list(self._registry.items()):
+            status = entry.get("status", "")
+            if status == "running":
+                # Was running when we crashed — mark interrupted then resume
+                self._update_task(task_id, status="interrupted")
+            if status in ("running", "interrupted"):
+                try:
+                    result = await self.resume(task_id)
+                    logger.info(f"Auto-resumed subagent [{task_id}]: {result}")
+                    resumed += 1
+                except Exception as e:
+                    logger.error(f"Failed to auto-resume subagent [{task_id}]: {e}")
+        return resumed
+
     # ------------------------------------------------------------------
     # Internal execution
     # ------------------------------------------------------------------
