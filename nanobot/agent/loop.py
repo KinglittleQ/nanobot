@@ -155,14 +155,13 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
-    def _tool_hint(tool_calls: list) -> str:
-        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
-        def _fmt(tc):
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
-            if not isinstance(val, str):
-                return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
-        return ", ".join(_fmt(tc) for tc in tool_calls)
+    def _format_tool_detail(name: str, arguments: dict, result: str, max_result_len: int = 2000) -> str:
+        """Format a complete tool call with arguments and result for user display."""
+        args_str = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else "{}"
+        result_display = result
+        if len(result) > max_result_len:
+            result_display = result[:max_result_len] + f"\n... ({len(result)} chars total, truncated)"
+        return f"🔧 **{name}**\n```\n{args_str}\n```\n📤 Result:\n```\n{result_display}\n```"
 
     async def _run_agent_loop(
         self,
@@ -198,7 +197,8 @@ class AgentLoop:
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
-                    await on_progress(clean or self._tool_hint(response.tool_calls))
+                    if clean:
+                        await on_progress(clean)
 
                 tool_call_dicts = [
                     {
@@ -219,8 +219,13 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    logger.info(f"Tool call: {tool_call.name}({args_str})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if on_progress:
+                        detail = self._format_tool_detail(
+                            tool_call.name, tool_call.arguments, result
+                        )
+                        await on_progress(detail)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )

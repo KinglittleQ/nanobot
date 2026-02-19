@@ -433,7 +433,7 @@ def gateway(
                         content=notify.message,
                     ))
                     console.print(f"[green]✓[/green] Startup notification sent to {notify.channel}:{notify.chat_id}")
-                asyncio.create_task(_send_startup_notify())
+                _startup_task = asyncio.create_task(_send_startup_notify())  # prevent GC
 
             await asyncio.gather(
                 agent.run(),
