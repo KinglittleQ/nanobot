@@ -2,6 +2,7 @@
 
 import html
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -11,9 +12,12 @@ import httpx
 
 from nanobot.agent.tools.base import Tool
 
+logger = logging.getLogger(__name__)
+
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
+FALLBACK_PROXY = "http://127.0.0.1:7892"  # Proxy to try when direct connection fails
 
 
 def _strip_tags(text: str) -> str:
@@ -65,9 +69,10 @@ class WebSearchTool(Tool):
         if not self.api_key:
             return "Error: BRAVE_API_KEY not configured"
         
-        try:
-            n = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
+        n = min(max(count or self.max_results, 1), 10)
+        
+        async def _do_search(proxy: str | None) -> httpx.Response:
+            async with httpx.AsyncClient(proxy=proxy) as client:
                 r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": n},
@@ -75,6 +80,18 @@ class WebSearchTool(Tool):
                     timeout=10.0
                 )
                 r.raise_for_status()
+                return r
+        
+        try:
+            # Try direct first (or with env proxy if set)
+            env_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+            try:
+                r = await _do_search(env_proxy)
+            except Exception as e:
+                if env_proxy:
+                    raise  # Already using a proxy, don't retry
+                logger.info(f"web_search direct failed ({e}), retrying with proxy")
+                r = await _do_search(FALLBACK_PROXY)
             
             results = r.json().get("web", {}).get("results", [])
             if not results:
@@ -118,14 +135,27 @@ class WebFetchTool(Tool):
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url})
 
-        try:
+        async def _do_fetch(proxy: str | None) -> httpx.Response:
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 max_redirects=MAX_REDIRECTS,
-                timeout=30.0
+                timeout=30.0,
+                proxy=proxy
             ) as client:
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
+                return r
+
+        try:
+            # Try direct first (or with env proxy if set)
+            env_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+            try:
+                r = await _do_fetch(env_proxy)
+            except Exception as e:
+                if env_proxy:
+                    raise  # Already using a proxy, don't retry
+                logger.info(f"web_fetch direct failed for {url} ({e}), retrying with proxy")
+                r = await _do_fetch(FALLBACK_PROXY)
             
             ctype = r.headers.get("content-type", "")
             

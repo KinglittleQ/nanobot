@@ -3,6 +3,7 @@
 from typing import Any, Callable, Awaitable
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tool_context import get_tool_channel, get_tool_chat_id
 from nanobot.bus.events import OutboundMessage
 
 
@@ -20,7 +21,7 @@ class MessageTool(Tool):
         self._default_chat_id = default_chat_id
     
     def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current message context."""
+        """Set the current message context (legacy, prefer contextvars)."""
         self._default_channel = channel
         self._default_chat_id = chat_id
     
@@ -70,8 +71,8 @@ class MessageTool(Tool):
         media: list[str] | None = None,
         **kwargs: Any
     ) -> str:
-        channel = channel or self._default_channel
-        chat_id = chat_id or self._default_chat_id
+        channel = channel or get_tool_channel() or self._default_channel
+        chat_id = chat_id or get_tool_chat_id() or self._default_chat_id
         
         if not channel or not chat_id:
             return "Error: No target channel/chat specified"

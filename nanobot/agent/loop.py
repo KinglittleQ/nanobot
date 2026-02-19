@@ -21,6 +21,7 @@ from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tool_context import set_tool_context
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
@@ -54,6 +55,7 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
+        max_concurrent_sessions: int = 5,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -89,6 +91,9 @@ class AgentLoop:
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
+        self.verbose_tool_output = False  # Default: brief mode
+        self._session_locks: dict[str, asyncio.Lock] = {}  # Per-session locks
+        self._concurrency_sem = asyncio.Semaphore(max_concurrent_sessions)
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
@@ -134,7 +139,15 @@ class AgentLoop:
         await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
 
     def _set_tool_context(self, channel: str, chat_id: str) -> None:
-        """Update context for all tools that need routing info."""
+        """Update context for all tools that need routing info.
+
+        Sets both the coroutine-local contextvars (used by concurrent
+        sessions) and the legacy instance-level defaults.
+        """
+        # Coroutine-local context (safe for concurrent sessions)
+        set_tool_context(channel, chat_id)
+
+        # Legacy instance-level defaults (kept for backward compatibility)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.set_context(channel, chat_id)
@@ -155,8 +168,31 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
-    def _format_tool_detail(name: str, arguments: dict, result: str, max_lines: int = 5) -> str:
-        """Format a complete tool call with arguments and result for user display."""
+    def _format_tool_detail(name: str, arguments: dict, result: str, max_lines: int = 5, verbose: bool = True) -> str:
+        """Format a complete tool call with arguments and result for user display.
+        
+        When verbose=False, returns a single-line summary.
+        """
+        if not verbose:
+            # Brief mode: single line
+            result_preview = result.replace("\n", " ").strip()
+            if len(result_preview) > 80:
+                result_preview = result_preview[:77] + "..."
+            # Show key argument (first string value or first key)
+            arg_hint = ""
+            if arguments:
+                for k, v in arguments.items():
+                    if isinstance(v, str) and len(v) < 80:
+                        arg_hint = f" {k}={v}"
+                        break
+                if not arg_hint:
+                    first_key = next(iter(arguments))
+                    val = str(arguments[first_key])
+                    if len(val) > 40:
+                        val = val[:37] + "..."
+                    arg_hint = f" {first_key}={val}"
+            return f"🔧 {name}{arg_hint} → {result_preview}"
+
         args_str = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else "{}"
         lines = result.splitlines()
         if len(lines) > max_lines:
@@ -247,7 +283,8 @@ class AgentLoop:
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     if on_progress:
                         detail = self._format_tool_detail(
-                            tool_call.name, tool_call.arguments, result
+                            tool_call.name, tool_call.arguments, result,
+                            verbose=self.verbose_tool_output,
                         )
                         await on_progress(detail)
                     messages = self.context.add_tool_result(
@@ -266,18 +303,25 @@ class AgentLoop:
 
         return final_content, tools_used, new_messages, hit_max
 
-    async def run(self) -> None:
-        """Run the agent loop, processing messages from the bus."""
-        self._running = True
-        await self._connect_mcp()
-        logger.info("Agent loop started")
+    def _get_session_lock(self, session_key: str) -> asyncio.Lock:
+        """Get or create a per-session lock to serialize messages within the same session."""
+        if session_key not in self._session_locks:
+            self._session_locks[session_key] = asyncio.Lock()
+        return self._session_locks[session_key]
 
-        while self._running:
-            try:
-                msg = await asyncio.wait_for(
-                    self.bus.consume_inbound(),
-                    timeout=1.0
-                )
+    async def _handle_message(self, msg: InboundMessage) -> None:
+        """Handle a single inbound message with per-session serialization.
+
+        Messages from different sessions run concurrently, but messages
+        targeting the same session are serialized via a per-session lock.
+        The session lock is acquired *before* the concurrency semaphore so
+        that queued messages for the same session don't waste semaphore slots.
+        """
+        session_key = msg.session_key
+        lock = self._get_session_lock(session_key)
+
+        async with lock:
+            async with self._concurrency_sem:
                 try:
                     response = await self._process_message(msg)
                     if response:
@@ -289,8 +333,36 @@ class AgentLoop:
                         chat_id=msg.chat_id,
                         content=f"Sorry, I encountered an error: {str(e)}"
                     ))
+
+    async def run(self) -> None:
+        """Run the agent loop, processing messages from the bus.
+
+        Messages from different sessions are processed concurrently (up to
+        max_concurrent_sessions).  Messages within the same session are
+        serialized to avoid race conditions on shared session state.
+        """
+        self._running = True
+        await self._connect_mcp()
+        logger.info("Agent loop started (concurrent session processing enabled)")
+
+        tasks: set[asyncio.Task] = set()
+
+        while self._running:
+            try:
+                msg = await asyncio.wait_for(
+                    self.bus.consume_inbound(),
+                    timeout=1.0
+                )
+                task = asyncio.create_task(self._handle_message(msg))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
             except asyncio.TimeoutError:
                 continue
+
+        # Wait for in-flight tasks on shutdown
+        if tasks:
+            logger.info(f"Waiting for {len(tasks)} in-flight tasks to complete...")
+            await asyncio.gather(*tasks, return_exceptions=True)
     
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -351,8 +423,17 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started. Memory consolidation in progress.")
         if cmd == "/help":
+            mode = "verbose 📝" if self.verbose_tool_output else "brief 📎"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
+                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/verbose — Verbose tool output\n/brief — Brief tool output (one line)\n/help — Show available commands\n\nCurrent tool output mode: {mode}")
+        if cmd == "/verbose":
+            self.verbose_tool_output = True
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="📝 Tool output mode: **verbose** (full details)")
+        if cmd == "/brief":
+            self.verbose_tool_output = False
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="📎 Tool output mode: **brief** (one line per tool call)")
         
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
