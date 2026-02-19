@@ -155,12 +155,14 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
-    def _format_tool_detail(name: str, arguments: dict, result: str, max_result_len: int = 2000) -> str:
+    def _format_tool_detail(name: str, arguments: dict, result: str, max_lines: int = 5) -> str:
         """Format a complete tool call with arguments and result for user display."""
         args_str = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else "{}"
-        result_display = result
-        if len(result) > max_result_len:
-            result_display = result[:max_result_len] + f"\n... ({len(result)} chars total, truncated)"
+        lines = result.splitlines()
+        if len(lines) > max_lines:
+            result_display = "\n".join(lines[:max_lines]) + f"\n... ({len(lines)} lines total, showing first {max_lines})"
+        else:
+            result_display = result
         return f"🔧 **{name}**\n```\n{args_str}\n```\n📤 Result:\n```\n{result_display}\n```"
 
     async def _run_agent_loop(
