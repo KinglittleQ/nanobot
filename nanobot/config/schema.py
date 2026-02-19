@@ -225,11 +225,15 @@ class ProvidersConfig(Base):
 
 
 class StartupNotifyConfig(Base):
-    """Startup notification configuration. Send a message when gateway starts."""
+    """Startup notification configuration. Send a message when gateway starts.
+
+    When ``channel`` and ``chat_id`` are empty (the default), the notification
+    is broadcast to **all** existing sessions (except ``cli:direct``).
+    """
 
     enabled: bool = False
-    channel: str = ""  # Channel to notify (e.g. "feishu", "telegram")
-    chat_id: str = ""  # Chat/user ID to notify
+    channel: str = ""  # Channel to notify (e.g. "feishu", "telegram"). Empty = all sessions.
+    chat_id: str = ""  # Chat/user ID to notify. Empty = all sessions.
     message: str = "🐈 nanobot 重启成功！"  # Notification message
 
 

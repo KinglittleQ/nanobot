@@ -112,6 +112,7 @@ class FeishuChannel(BaseChannel):
         self._ws_thread: threading.Thread | None = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._bot_open_id: str | None = None  # Bot's own open_id for mention detection
     
     async def start(self) -> None:
         """Start the Feishu bot with WebSocket long connection."""
@@ -132,6 +133,9 @@ class FeishuChannel(BaseChannel):
             .app_secret(self.config.app_secret) \
             .log_level(lark.LogLevel.INFO) \
             .build()
+        
+        # Fetch bot's own open_id for mention detection in group chats
+        await self._fetch_bot_open_id()
         
         # Create event handler (only register message receive, ignore other events)
         event_handler = lark.EventDispatcherHandler.builder(
@@ -169,6 +173,68 @@ class FeishuChannel(BaseChannel):
         while self._running:
             await asyncio.sleep(1)
     
+    async def _fetch_bot_open_id(self) -> None:
+        """Fetch the bot's own open_id via Feishu API for mention detection."""
+        import requests
+        try:
+            loop = asyncio.get_running_loop()
+            def _fetch():
+                # Get tenant access token
+                resp = requests.post(
+                    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                    json={"app_id": self.config.app_id, "app_secret": self.config.app_secret},
+                    timeout=10,
+                )
+                token = resp.json().get("tenant_access_token")
+                if not token:
+                    return None
+                # Get bot info
+                resp2 = requests.get(
+                    "https://open.feishu.cn/open-apis/bot/v3/info",
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10,
+                )
+                data = resp2.json()
+                if data.get("code") == 0:
+                    return data.get("bot", {}).get("open_id")
+                return None
+            
+            self._bot_open_id = await loop.run_in_executor(None, _fetch)
+            if self._bot_open_id:
+                logger.info(f"Bot open_id: {self._bot_open_id}")
+            else:
+                logger.warning("Failed to fetch bot open_id; group mention filtering disabled")
+        except Exception as e:
+            logger.warning(f"Error fetching bot open_id: {e}")
+
+    def _is_bot_mentioned(self, message) -> bool:
+        """Check if the bot is mentioned in the message."""
+        mentions = getattr(message, "mentions", None)
+        if not mentions:
+            return False
+        for mention in mentions:
+            mid = getattr(mention, "id", None)
+            if mid:
+                open_id = getattr(mid, "open_id", None)
+                if open_id and open_id == self._bot_open_id:
+                    return True
+        return False
+
+    def _strip_bot_mention(self, content: str, message) -> str:
+        """Remove the bot @mention placeholder from message content."""
+        mentions = getattr(message, "mentions", None)
+        if not mentions:
+            return content
+        for mention in mentions:
+            mid = getattr(mention, "id", None)
+            if mid:
+                open_id = getattr(mid, "open_id", None)
+                if open_id and open_id == self._bot_open_id:
+                    key = getattr(mention, "key", None)
+                    if key:
+                        content = content.replace(key, "").strip()
+        return content
+
     async def stop(self) -> None:
         """Stop the Feishu bot."""
         self._running = False
@@ -553,6 +619,12 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type  # "p2p" or "group"
             msg_type = message.message_type
             
+            # In group chats, only respond when the bot is @mentioned
+            if chat_type == "group" and self._bot_open_id:
+                if not self._is_bot_mentioned(message):
+                    logger.debug(f"Ignoring group message without bot mention: {message_id}")
+                    return
+            
             # Add reaction to indicate "seen"
             await self._add_reaction(message_id, "THUMBSUP")
             
@@ -573,6 +645,12 @@ class FeishuChannel(BaseChannel):
             
             if not content:
                 return
+            
+            # Strip bot @mention placeholder from content
+            if chat_type == "group":
+                content = self._strip_bot_mention(content, message)
+                if not content:
+                    return
             
             # Forward to message bus
             reply_to = chat_id if chat_type == "group" else sender_id

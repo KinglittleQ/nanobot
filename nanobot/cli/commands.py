@@ -422,17 +422,39 @@ def gateway(
 
             # Send startup notification if configured
             notify = config.gateway.startup_notify
-            if notify.enabled and notify.channel and notify.chat_id:
+            if notify.enabled:
                 async def _send_startup_notify():
                     """Wait for channel to be ready, then send notification."""
                     await asyncio.sleep(3)  # Give channels time to connect
                     from nanobot.bus.events import OutboundMessage
-                    await bus.publish_outbound(OutboundMessage(
-                        channel=notify.channel,
-                        chat_id=notify.chat_id,
-                        content=notify.message,
-                    ))
-                    console.print(f"[green]✓[/green] Startup notification sent to {notify.channel}:{notify.chat_id}")
+
+                    targets: list[tuple[str, str]] = []
+
+                    if notify.channel and notify.chat_id:
+                        # Explicit single target (backward compatible)
+                        targets.append((notify.channel, notify.chat_id))
+                    else:
+                        # Broadcast to all existing sessions (except cli:direct)
+                        for path in agent.sessions.sessions_dir.glob("*.jsonl"):
+                            stem = path.stem  # e.g. "feishu_ou_4ab6c4916575f4780a9c69310e5d3e97"
+                            if stem == "cli_direct" or not stem:
+                                continue
+                            # Split on first underscore only: channel_chatid
+                            parts = stem.split("_", 1)
+                            if len(parts) == 2:
+                                targets.append((parts[0], parts[1]))
+
+                    for ch, cid in targets:
+                        try:
+                            await bus.publish_outbound(OutboundMessage(
+                                channel=ch,
+                                chat_id=cid,
+                                content=notify.message,
+                            ))
+                            console.print(f"[green]✓[/green] Startup notification sent to {ch}:{cid}")
+                        except Exception as e:
+                            console.print(f"[yellow]⚠[/yellow] Failed to notify {ch}:{cid}: {e}")
+
                 _startup_task = asyncio.create_task(_send_startup_notify())  # prevent GC
 
             await asyncio.gather(

@@ -169,6 +169,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        session: Session | None = None,
     ) -> tuple[str | None, list[str], list[dict], bool]:
         """
         Run the agent iteration loop.
@@ -176,6 +177,9 @@ class AgentLoop:
         Args:
             initial_messages: Starting messages for the LLM conversation.
             on_progress: Optional callback to push intermediate content to the user.
+            session: Optional session for incremental persistence. When provided,
+                     new messages are saved to disk after each LLM round so that
+                     progress is not lost on restart.
 
         Returns:
             Tuple of (final_content, list_of_tools_used, full_messages, hit_max).
@@ -186,6 +190,22 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+
+        # Track how many non-system messages have already been persisted to the session.
+        # This lets us incrementally append only the *new* messages each round.
+        persisted_count = len(session.messages) if session else 0
+
+        def _flush_to_session() -> None:
+            """Incrementally persist any new messages to the session on disk."""
+            nonlocal persisted_count
+            if session is None:
+                return
+            non_system = [m for m in messages if m.get("role") != "system"]
+            new_msgs = non_system[persisted_count:]
+            if new_msgs:
+                session.extend_messages(new_msgs)
+                self.sessions.save(session)
+                persisted_count = len(session.messages)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -233,6 +253,9 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                # Persist after each tool-call round so progress survives restarts
+                _flush_to_session()
             else:
                 final_content = self._strip_think(response.content)
                 break
@@ -351,6 +374,7 @@ class AgentLoop:
 
         final_content, tools_used, full_messages, hit_max = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
+            session=session,
         )
 
         if final_content is None:
@@ -358,24 +382,17 @@ class AgentLoop:
                 final_content = "⚠️ 达到最大迭代次数，任务可能未完成。"
             else:
                 # Already responded via tool calls (e.g. message tool), no extra reply needed
-                # Still need to save messages to session
-                history_count = len(session.messages)
-                new_turn_messages = full_messages[history_count:]
-                session.extend_messages(new_turn_messages)
-                self.sessions.save(session)
+                # Intermediate messages were already saved incrementally by _run_agent_loop.
+                # Save any remaining unsaved messages (e.g. final assistant message).
+                self._save_remaining(session, full_messages)
                 return None
         
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
         
-        # Save complete messages (including tool calls/results) for context persistence
-        # full_messages already excludes the system prompt; it contains history + new turn
-        # We only need to save the new messages from this turn (not the history already in session)
-        history_count = len(session.messages)
-        # full_messages = [history...] + [new user msg] + [assistant/tool msgs...]
-        new_turn_messages = full_messages[history_count:]
-        session.extend_messages(new_turn_messages)
-        self.sessions.save(session)
+        # Save any remaining messages not yet persisted (e.g. the final assistant reply).
+        # Most tool-call rounds were already saved incrementally by _run_agent_loop.
+        self._save_remaining(session, full_messages)
         
         return OutboundMessage(
             channel=msg.channel,
@@ -384,6 +401,19 @@ class AgentLoop:
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
     
+    def _save_remaining(self, session: Session, full_messages: list[dict]) -> None:
+        """Persist any messages from full_messages that are not yet in the session.
+
+        _run_agent_loop incrementally saves after each tool-call round, but the
+        final assistant reply (or user message in a no-tool-call turn) may still
+        be unsaved.  This method calculates the diff and saves only the new ones.
+        """
+        history_count = len(session.messages)
+        new_turn_messages = full_messages[history_count:]
+        if new_turn_messages:
+            session.extend_messages(new_turn_messages)
+            self.sessions.save(session)
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
@@ -408,11 +438,13 @@ class AgentLoop:
         self._set_tool_context(origin_channel, origin_chat_id)
         initial_messages = self.context.build_messages(
             history=session.get_history(max_messages=self.memory_window),
-            current_message=msg.content,
+            current_message=f"[System: {msg.sender_id}] {msg.content}",
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        final_content, _, full_messages, hit_max = await self._run_agent_loop(initial_messages)
+        final_content, _, full_messages, hit_max = await self._run_agent_loop(
+            initial_messages, session=session,
+        )
 
         if final_content is None:
             if hit_max:
@@ -420,16 +452,8 @@ class AgentLoop:
             else:
                 final_content = "Background task completed."
         
-        # Save complete messages for context persistence
-        history_count = len(session.messages)
-        # Prepend system sender info to user message content
-        if full_messages and len(full_messages) > history_count:
-            first_new = full_messages[history_count]
-            if first_new.get("role") == "user":
-                first_new["content"] = f"[System: {msg.sender_id}] {first_new.get('content', '')}"
-        new_turn_messages = full_messages[history_count:]
-        session.extend_messages(new_turn_messages)
-        self.sessions.save(session)
+        # Save any remaining messages (final reply, etc.)
+        self._save_remaining(session, full_messages)
         
         return OutboundMessage(
             channel=origin_channel,
