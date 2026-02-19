@@ -77,12 +77,21 @@ class SubagentManager:
         return {}
 
     def _save_registry(self) -> None:
-        """Save the task registry to disk."""
+        """Save the task registry to disk atomically."""
+        import os
+        import tempfile
         try:
-            self._registry_path.write_text(
-                json.dumps({"tasks": self._registry}, indent=2, ensure_ascii=False)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._store_dir), suffix=".tmp"
             )
-        except Exception as e:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"tasks": self._registry}, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, str(self._registry_path))
+        except BaseException as e:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             logger.warning(f"Failed to save subagent registry: {e}")
 
     def _update_task(self, task_id: str, **fields: Any) -> None:
@@ -294,6 +303,12 @@ class SubagentManager:
             message_tool.set_context(origin["channel"], origin["chat_id"])
             tools.register(message_tool)
 
+            # Set tool context for this subagent coroutine so contextvars
+            # (used by message tool, filesystem protected file checks, etc.)
+            # point to the correct origin session, not the main agent's last session.
+            from nanobot.agent.tool_context import set_tool_context
+            set_tool_context(origin["channel"], origin["chat_id"], reply_to=reply_to)
+
             # Build messages with subagent-specific prompt
             system_prompt = self._build_subagent_prompt(task)
             messages: list[dict[str, Any]] = [
@@ -302,11 +317,20 @@ class SubagentManager:
             ]
 
             # Run agent loop
-            max_iterations = 500
+            max_iterations = 200
+            max_duration_s = 30 * 60  # 30 minute timeout
             iteration = 0
+            start_time = time.time()
             final_result: str | None = None
 
             while iteration < max_iterations:
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > max_duration_s:
+                    final_result = f"⚠️ Task timed out after {int(elapsed // 60)} minutes."
+                    self._append_log(task_id, f"TIMEOUT after {int(elapsed)}s")
+                    break
+
                 iteration += 1
                 self._update_task(task_id, iterations=iteration, updated_at=datetime.now().isoformat())
 

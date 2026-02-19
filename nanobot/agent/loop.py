@@ -286,6 +286,12 @@ class AgentLoop:
             if session and response.usage:
                 self._track_usage(session.key, response.usage)
 
+            # Handle LLM errors — don't save error responses to session history
+            if response.finish_reason == "error":
+                logger.error(f"LLM returned error: {response.content}")
+                final_content = response.content
+                break
+
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
@@ -827,9 +833,14 @@ Respond with ONLY valid JSON, no markdown fences."""
                 session.last_consolidated = 0
             else:
                 session.last_consolidated = len(session.messages) - keep_count
+                self.sessions.save(session)  # Persist updated last_consolidated
             logger.info(f"Memory consolidation done: {len(session.messages)} messages, last_consolidated={session.last_consolidated}")
         except Exception as e:
             logger.error(f"Memory consolidation failed: {e}")
+            # Still advance last_consolidated to avoid retrying the same messages
+            if not archive_all and keep_count:
+                session.last_consolidated = len(session.messages) - keep_count
+                self.sessions.save(session)
 
     async def process_direct(
         self,

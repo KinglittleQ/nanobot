@@ -22,13 +22,25 @@ def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
 _DEFAULT_PROTECTED_FILENAMES = {"SOUL.md", "AGENTS.md", "USER.md"}
 
 
+# Cache for admin.json to avoid re-reading on every tool call
+_admin_cache: dict | None = None
+_admin_mtime: float = 0.0
+
+
 def _load_admin_config() -> dict:
-    """Load admin configuration from workspace admin.json."""
+    """Load admin configuration from workspace admin.json (cached by mtime)."""
+    global _admin_cache, _admin_mtime
     config_path = Path.home() / ".nanobot" / "workspace" / "admin.json"
     if not config_path.exists():
+        _admin_cache = {}
         return {}
     try:
-        return json.loads(config_path.read_text())
+        mtime = config_path.stat().st_mtime
+        if _admin_cache is not None and mtime == _admin_mtime:
+            return _admin_cache
+        _admin_cache = json.loads(config_path.read_text())
+        _admin_mtime = mtime
+        return _admin_cache
     except Exception as e:
         logger.warning(f"Failed to load admin.json: {e}")
         return {}
@@ -100,7 +112,12 @@ class ReadFileTool(Tool):
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
             
-            content = file_path.read_text(encoding="utf-8")
+            # Check for binary files before attempting to read as text
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                size = file_path.stat().st_size
+                return f"Error: {path} appears to be a binary file ({size} bytes). Cannot read as text."
             return content
         except PermissionError as e:
             return f"Error: {e}"

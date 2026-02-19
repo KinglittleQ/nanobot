@@ -35,13 +35,22 @@ def _normalize(text: str) -> str:
 
 
 def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL: must be http(s) with valid domain."""
+    """Validate URL: must be http(s) with valid domain, no private IPs."""
     try:
         p = urlparse(url)
         if p.scheme not in ('http', 'https'):
             return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
         if not p.netloc:
             return False, "Missing domain"
+        # Block private/internal IPs to prevent SSRF
+        hostname = p.hostname or ""
+        try:
+            import ipaddress
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False, f"Access to private/internal IP {hostname} is blocked"
+        except ValueError:
+            pass  # Not an IP literal, hostname will be resolved by httpx
         return True, ""
     except Exception as e:
         return False, str(e)

@@ -268,20 +268,38 @@ class SessionManager:
             return None
     
     def save(self, session: Session) -> None:
-        """Save a session to disk."""
+        """Save a session to disk atomically.
+
+        Writes to a temporary file first, then renames (atomic on POSIX)
+        to avoid data loss if the process crashes mid-write.
+        """
+        import os
+        import tempfile
+
         path = self._get_session_path(session.key)
 
-        with open(path, "w") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
-            }
-            f.write(json.dumps(metadata_line) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg) + "\n")
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.sessions_dir), suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                metadata_line = {
+                    "_type": "metadata",
+                    "created_at": session.created_at.isoformat(),
+                    "updated_at": session.updated_at.isoformat(),
+                    "metadata": session.metadata,
+                    "last_consolidated": session.last_consolidated
+                }
+                f.write(json.dumps(metadata_line) + "\n")
+                for msg in session.messages:
+                    f.write(json.dumps(msg) + "\n")
+            os.replace(tmp_path, str(path))  # atomic on POSIX
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         self._cache[session.key] = session
     
