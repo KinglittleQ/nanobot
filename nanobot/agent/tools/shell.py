@@ -72,6 +72,7 @@ class ExecTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                executable="/bin/bash",
             )
             
             try:
