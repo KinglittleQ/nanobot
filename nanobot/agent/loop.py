@@ -94,6 +94,9 @@ class AgentLoop:
         self.verbose_tool_output = False  # Default: brief mode
         self._session_locks: dict[str, asyncio.Lock] = {}  # Per-session locks
         self._concurrency_sem = asyncio.Semaphore(max_concurrent_sessions)
+        self._start_time: float | None = None  # Set when run() starts
+        # Per-session token usage: {session_key: {prompt_tokens, completion_tokens, total_tokens, llm_calls}}
+        self._usage_stats: dict[str, dict[str, int]] = {}
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
@@ -138,14 +141,14 @@ class AgentLoop:
         await self._mcp_stack.__aenter__()
         await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
 
-    def _set_tool_context(self, channel: str, chat_id: str, sender_id: str = "") -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, sender_id: str = "", reply_to: str = "") -> None:
         """Update context for all tools that need routing info.
 
         Sets both the coroutine-local contextvars (used by concurrent
         sessions) and the legacy instance-level defaults.
         """
         # Coroutine-local context (safe for concurrent sessions)
-        set_tool_context(channel, chat_id, sender_id=sender_id)
+        set_tool_context(channel, chat_id, sender_id=sender_id, reply_to=reply_to)
 
         # Legacy instance-level defaults (kept for backward compatibility)
         if message_tool := self.tools.get("message"):
@@ -159,6 +162,31 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+
+    def _track_usage(self, session_key: str, usage: dict[str, int]) -> None:
+        """Accumulate token usage for a session."""
+        if not usage:
+            return
+        if session_key not in self._usage_stats:
+            self._usage_stats[session_key] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "llm_calls": 0,
+            }
+        stats = self._usage_stats[session_key]
+        stats["prompt_tokens"] += usage.get("prompt_tokens", 0)
+        stats["completion_tokens"] += usage.get("completion_tokens", 0)
+        stats["total_tokens"] += usage.get("total_tokens", 0)
+        stats["llm_calls"] += 1
+
+    def _get_global_usage(self) -> dict[str, int]:
+        """Get aggregated token usage across all sessions."""
+        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0}
+        for stats in self._usage_stats.values():
+            for k in totals:
+                totals[k] += stats.get(k, 0)
+        return totals
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -254,6 +282,10 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
             )
 
+            # Track token usage
+            if session and response.usage:
+                self._track_usage(session.key, response.usage)
+
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
@@ -304,10 +336,20 @@ class AgentLoop:
         return final_content, tools_used, new_messages, hit_max
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
-        """Get or create a per-session lock to serialize messages within the same session."""
+        """Get or create a per-session lock to serialize messages within the same session.
+
+        Locks are cleaned up after use when no other task is waiting, to prevent
+        unbounded growth of the _session_locks dict over time.
+        """
         if session_key not in self._session_locks:
             self._session_locks[session_key] = asyncio.Lock()
         return self._session_locks[session_key]
+
+    def _release_session_lock(self, session_key: str) -> None:
+        """Remove a session lock if it is no longer in use (not locked, no waiters)."""
+        lock = self._session_locks.get(session_key)
+        if lock and not lock.locked():
+            self._session_locks.pop(session_key, None)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
         """Handle a single inbound message with per-session serialization.
@@ -325,14 +367,21 @@ class AgentLoop:
                 try:
                     response = await self._process_message(msg)
                     if response:
+                        # Auto-set reply_to from inbound message metadata if not already set
+                        if not response.reply_to and msg.metadata:
+                            response.reply_to = msg.metadata.get("reply_to") or msg.metadata.get("message_id")
                         await self.bus.publish_outbound(response)
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
+                        content=f"Sorry, I encountered an error: {str(e)}",
+                        reply_to=(msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id"),
                     ))
+
+        # Clean up lock if no other task is waiting on it
+        self._release_session_lock(session_key)
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus.
@@ -342,6 +391,7 @@ class AgentLoop:
         serialized to avoid race conditions on shared session state.
         """
         self._running = True
+        self._start_time = __import__("time").time()
         await self._connect_mcp()
         logger.info("Agent loop started (concurrent session processing enabled)")
 
@@ -425,7 +475,7 @@ class AgentLoop:
         if cmd == "/help":
             mode = "verbose 📝" if self.verbose_tool_output else "brief 📎"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/verbose — Verbose tool output\n/brief — Brief tool output (one line)\n/help — Show available commands\n\nCurrent tool output mode: {mode}")
+                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/verbose — Verbose tool output\n/brief — Brief tool output (one line)\n/help — Show available commands\n\nCurrent tool output mode: {mode}")
         if cmd == "/verbose":
             self.verbose_tool_output = True
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
@@ -434,11 +484,25 @@ class AgentLoop:
             self.verbose_tool_output = False
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="📎 Tool output mode: **brief** (one line per tool call)")
+        if cmd == "/status":
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=self._build_status(key, session))
+        if cmd.startswith("/tasks"):
+            return await self._handle_tasks_command(cmd, msg)
         
         if len(session.messages) > self.memory_window:
-            asyncio.create_task(self._consolidate_memory(session))
+            # Consolidation runs in background but needs session lock to avoid
+            # racing with message processing.  Acquire the same per-session lock.
+            async def _safe_consolidate():
+                lock = self._get_session_lock(key)
+                async with lock:
+                    await self._consolidate_memory(session)
+                self._release_session_lock(key)
+            asyncio.create_task(_safe_consolidate())
 
-        self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id)
+        # Determine reply_to: thread root if in thread, otherwise user's message_id
+        _reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id") or ""
+        self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id, reply_to=_reply_to)
         initial_messages = self.context.build_messages(
             history=session.get_history(max_messages=self.memory_window),
             current_message=msg.content,
@@ -448,8 +512,11 @@ class AgentLoop:
         )
 
         async def _bus_progress(content: str) -> None:
+            # reply_to: use thread root if in a thread, otherwise reply to user's message
+            _reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id")
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content,
+                reply_to=_reply_to,
                 metadata=msg.metadata or {},
             ))
 
@@ -474,14 +541,135 @@ class AgentLoop:
         # Save any remaining messages not yet persisted (e.g. the final assistant reply).
         # Most tool-call rounds were already saved incrementally by _run_agent_loop.
         self._save_remaining(session, full_messages)
+
+        # Reply to thread root if in a thread, otherwise reply to user's message
+        _final_reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id")
         
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
+            reply_to=_final_reply_to,
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
     
+    def _build_status(self, session_key: str, session: Session) -> str:
+        """Build a status report string for the /status command."""
+        import time as _time
+        lines = ["🐈 **nanobot status**\n"]
+
+        # --- Uptime ---
+        if self._start_time:
+            elapsed = _time.time() - self._start_time
+            hours, rem = divmod(int(elapsed), 3600)
+            minutes, secs = divmod(rem, 60)
+            if hours > 0:
+                lines.append(f"⏱ Uptime: {hours}h {minutes}m {secs}s")
+            else:
+                lines.append(f"⏱ Uptime: {minutes}m {secs}s")
+
+        # --- Model ---
+        lines.append(f"🤖 Model: `{self.model}`")
+        mode = "verbose" if self.verbose_tool_output else "brief"
+        lines.append(f"🔧 Tool output: {mode}")
+
+        # --- Session info ---
+        msg_count = len(session.messages)
+        user_msgs = sum(1 for m in session.messages if m.get("role") == "user")
+        assistant_msgs = sum(1 for m in session.messages if m.get("role") == "assistant")
+        tool_msgs = sum(1 for m in session.messages if m.get("role") == "tool")
+        lines.append(f"\n📋 **Session** (`{session_key}`)")
+        lines.append(f"  Messages: {msg_count} (user: {user_msgs}, assistant: {assistant_msgs}, tool: {tool_msgs})")
+
+        # --- Session token usage ---
+        session_usage = self._usage_stats.get(session_key)
+        if session_usage:
+            lines.append(f"\n📊 **Token Usage (this session)**")
+            lines.append(f"  Prompt tokens: {session_usage['prompt_tokens']:,}")
+            lines.append(f"  Completion tokens: {session_usage['completion_tokens']:,}")
+            lines.append(f"  Total tokens: {session_usage['total_tokens']:,}")
+            lines.append(f"  LLM calls: {session_usage['llm_calls']}")
+        else:
+            lines.append(f"\n📊 **Token Usage (this session)**: no data yet")
+
+        # --- Global token usage ---
+        global_usage = self._get_global_usage()
+        if global_usage["llm_calls"] > 0:
+            lines.append(f"\n🌐 **Token Usage (all sessions since restart)**")
+            lines.append(f"  Prompt tokens: {global_usage['prompt_tokens']:,}")
+            lines.append(f"  Completion tokens: {global_usage['completion_tokens']:,}")
+            lines.append(f"  Total tokens: {global_usage['total_tokens']:,}")
+            lines.append(f"  LLM calls: {global_usage['llm_calls']}")
+
+        # --- Subagents ---
+        running_subagents = self.subagents.get_running_count()
+        if running_subagents > 0:
+            lines.append(f"\n🔄 Running subagents: {running_subagents}")
+
+        # --- Active sessions ---
+        active_sessions = len(self._session_locks)
+        lines.append(f"\n📡 Active sessions: {active_sessions}")
+
+        return "\n".join(lines)
+
+    async def _handle_tasks_command(self, cmd: str, msg: InboundMessage) -> OutboundMessage:
+        """Handle /tasks and its subcommands."""
+        parts = cmd.split()
+        subcmd = parts[1] if len(parts) > 1 else ""
+        task_id = parts[2] if len(parts) > 2 else ""
+
+        if subcmd == "log" and task_id:
+            log_content = self.subagents.read_log(task_id)
+            entry = self.subagents.get_task(task_id)
+            label = entry.get("label", task_id) if entry else task_id
+            content = f"📜 **Task log: {label}** (`{task_id}`)\n```\n{log_content}\n```"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if subcmd == "resume" and task_id:
+            result = await self.subagents.resume(task_id)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+
+        if subcmd == "cancel" and task_id:
+            result = self.subagents.cancel(task_id)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+
+        if subcmd == "all":
+            tasks = self.subagents.list_tasks(include_completed=True)
+        else:
+            tasks = self.subagents.list_tasks(include_completed=False)
+
+        if not tasks:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="No active tasks. Use `/tasks all` to see completed tasks too."
+            )
+
+        status_icons = {
+            "running": "🟢",
+            "completed": "✅",
+            "error": "❌",
+            "cancelled": "⛔",
+            "interrupted": "🟡",
+        }
+
+        lines = ["🔄 **Background Tasks**\n"]
+        for t in tasks:
+            icon = status_icons.get(t["status"], "❓")
+            label = t.get("label", t["id"])
+            tid = t["id"]
+            iters = t.get("iterations", 0)
+            tc = t.get("tool_calls", 0)
+            created = t.get("created_at", "?")[:16]
+            lines.append(f"{icon} **{label}** (`{tid}`)")
+            lines.append(f"  Status: {t['status']} | Iterations: {iters} | Tool calls: {tc}")
+            lines.append(f"  Created: {created}")
+            if t.get("error"):
+                lines.append(f"  Error: {t['error'][:100]}")
+            lines.append("")
+
+        lines.append("Commands: `/tasks log <id>` · `/tasks resume <id>` · `/tasks cancel <id>` · `/tasks all`")
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
+
     def _save_remaining(self, session: Session, full_messages: list[dict]) -> None:
         """Persist any messages from full_messages that are not yet in the session.
 

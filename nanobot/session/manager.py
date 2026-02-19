@@ -56,9 +56,38 @@ class Session:
         self.updated_at = datetime.now()
     
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Get recent messages in LLM format, preserving tool metadata."""
+        """Get recent messages in LLM format, preserving tool metadata.
+
+        After truncating to *max_messages*, the cut-off point may land in the
+        middle of a tool_use / tool_result group, leaving orphaned messages
+        that would cause a 400 error from Claude.  We sanitize the result to
+        remove any such orphans.
+        """
+        recent = self.messages[-max_messages:]
+
+        # --- smart truncation: avoid cutting inside a tool-call group ---
+        # Walk forward from the start of `recent` and skip any leading
+        # tool-result messages whose tool_use is not in this window.
+        # Collect tool_use ids present in this window first.
+        tool_use_ids: set[str] = set()
+        for m in recent:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    if tc_id := tc.get("id"):
+                        tool_use_ids.add(tc_id)
+
+        # Drop leading orphan tool-result messages (their tool_use was truncated)
+        start = 0
+        for i, m in enumerate(recent):
+            if m.get("role") == "tool" and m.get("tool_call_id") not in tool_use_ids:
+                start = i + 1
+            else:
+                break
+        recent = recent[start:]
+
+        # Build output, stripping internal fields like timestamp
         out: list[dict[str, Any]] = []
-        for m in self.messages[-max_messages:]:
+        for m in recent:
             entry: dict[str, Any] = {"role": m["role"]}
             # Only include content if present (some assistant msgs with tool_calls have no content)
             if "content" in m:
@@ -67,7 +96,10 @@ class Session:
                 if k in m:
                     entry[k] = m[k]
             out.append(entry)
-        return out
+
+        # Final safety net: run full sanitize to catch any remaining orphans
+        # (e.g. assistant with tool_calls at the end without results)
+        return SessionManager._sanitize_messages(out)
     
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""

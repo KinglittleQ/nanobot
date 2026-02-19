@@ -113,6 +113,8 @@ class FeishuChannel(BaseChannel):
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
         self._bot_open_id: str | None = None  # Bot's own open_id for mention detection
+        # Track message IDs sent by the bot, so we can detect thread replies
+        self._bot_sent_message_ids: OrderedDict[str, None] = OrderedDict()
     
     async def start(self) -> None:
         """Start the Feishu bot with WebSocket long connection."""
@@ -206,6 +208,23 @@ class FeishuChannel(BaseChannel):
                 logger.warning("Failed to fetch bot open_id; group mention filtering disabled")
         except Exception as e:
             logger.warning(f"Error fetching bot open_id: {e}")
+
+    def _track_bot_message(self, message_id: str) -> None:
+        """Record a message sent by the bot for thread detection."""
+        self._bot_sent_message_ids[message_id] = None
+        # Trim to keep memory bounded
+        while len(self._bot_sent_message_ids) > 500:
+            self._bot_sent_message_ids.popitem(last=False)
+
+    def _is_bot_thread(self, message) -> bool:
+        """Check if the message is a reply in a thread started by (or involving) the bot."""
+        root_id = getattr(message, "root_id", None)
+        parent_id = getattr(message, "parent_id", None)
+        if root_id and root_id in self._bot_sent_message_ids:
+            return True
+        if parent_id and parent_id in self._bot_sent_message_ids:
+            return True
+        return False
 
     def _is_bot_mentioned(self, message) -> bool:
         """Check if the bot is mentioned in the message."""
@@ -458,8 +477,11 @@ class FeishuChannel(BaseChannel):
             logger.warning(f"Failed to extract video thumbnail: {e}")
             return None
 
-    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
-        """Send a single message (text/image/file/interactive) synchronously."""
+    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> str | None:
+        """Send a single message (text/image/file/interactive) synchronously.
+
+        Returns the message_id on success, or None on failure.
+        """
         try:
             request = CreateMessageRequest.builder() \
                 .receive_id_type(receive_id_type) \
@@ -476,12 +498,44 @@ class FeishuChannel(BaseChannel):
                     f"Failed to send Feishu {msg_type} message: code={response.code}, "
                     f"msg={response.msg}, log_id={response.get_log_id()}"
                 )
-                return False
-            logger.debug(f"Feishu {msg_type} message sent to {receive_id}")
-            return True
+                return None
+            message_id = getattr(response.data, "message_id", None)
+            logger.debug(f"Feishu {msg_type} message sent to {receive_id}, message_id={message_id}")
+            if message_id:
+                self._track_bot_message(message_id)
+            return message_id
         except Exception as e:
             logger.error(f"Error sending Feishu {msg_type} message: {e}")
-            return False
+            return None
+
+    def _reply_message_sync(self, parent_message_id: str, msg_type: str, content: str) -> str | None:
+        """Reply to a message in a thread (话题). Returns message_id or None."""
+        try:
+            from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+            request = ReplyMessageRequest.builder() \
+                .message_id(parent_message_id) \
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .msg_type(msg_type)
+                    .content(content)
+                    .reply_in_thread(True)
+                    .build()
+                ).build()
+            response = self._client.im.v1.message.reply(request)
+            if not response.success():
+                logger.error(
+                    f"Failed to reply Feishu {msg_type} message: code={response.code}, "
+                    f"msg={response.msg}, log_id={response.get_log_id()}"
+                )
+                return None
+            message_id = getattr(response.data, "message_id", None)
+            logger.debug(f"Feishu {msg_type} reply sent to thread {parent_message_id}, message_id={message_id}")
+            if message_id:
+                self._track_bot_message(message_id)
+            return message_id
+        except Exception as e:
+            logger.error(f"Error replying Feishu {msg_type} message: {e}")
+            return None
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu, including media (images/files) if present."""
@@ -500,6 +554,19 @@ class FeishuChannel(BaseChannel):
                 receive_id_type = "open_id"
 
             loop = asyncio.get_running_loop()
+            reply_to = msg.reply_to or msg.metadata.get("reply_to")
+
+            # Helper: send or reply depending on whether we have a thread root
+            async def _send(msg_type: str, content: str) -> str | None:
+                if reply_to:
+                    return await loop.run_in_executor(
+                        None, self._reply_message_sync, reply_to, msg_type, content,
+                    )
+                else:
+                    return await loop.run_in_executor(
+                        None, self._send_message_sync,
+                        receive_id_type, msg.chat_id, msg_type, content,
+                    )
 
             # --- Send media attachments first ---
             if msg.media:
@@ -510,62 +577,38 @@ class FeishuChannel(BaseChannel):
 
                     ext = os.path.splitext(file_path)[1].lower()
                     if ext in self._IMAGE_EXTS:
-                        # Upload and send as image
                         image_key = await loop.run_in_executor(None, self._upload_image_sync, file_path)
                         if image_key:
-                            content = json.dumps({"image_key": image_key})
-                            await loop.run_in_executor(
-                                None, self._send_message_sync,
-                                receive_id_type, msg.chat_id, "image", content,
-                            )
+                            await _send("image", json.dumps({"image_key": image_key}))
                     elif ext in self._AUDIO_EXTS:
-                        # Upload and send as audio (voice message)
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
                         if file_key:
-                            content = json.dumps({"file_key": file_key})
-                            await loop.run_in_executor(
-                                None, self._send_message_sync,
-                                receive_id_type, msg.chat_id, "audio", content,
-                            )
+                            await _send("audio", json.dumps({"file_key": file_key}))
                     elif ext in self._VIDEO_EXTS:
-                        # Convert to mp4 if needed, extract thumbnail, upload and send as media (video)
                         mp4_path = await loop.run_in_executor(None, self._convert_to_mp4, file_path)
-                        # Extract thumbnail for video cover
                         thumb_path = await loop.run_in_executor(None, self._extract_video_thumbnail, mp4_path)
                         image_key = ""
                         if thumb_path:
                             image_key = await loop.run_in_executor(None, self._upload_image_sync, thumb_path) or ""
-                            # Clean up thumbnail
                             try:
                                 os.remove(thumb_path)
                             except OSError:
                                 pass
-                        # Upload video file
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, mp4_path)
                         if file_key:
                             media_content = {"file_key": file_key}
                             if image_key:
                                 media_content["image_key"] = image_key
-                            content = json.dumps(media_content)
-                            await loop.run_in_executor(
-                                None, self._send_message_sync,
-                                receive_id_type, msg.chat_id, "media", content,
-                            )
-                        # Clean up converted file
+                            await _send("media", json.dumps(media_content))
                         if mp4_path != file_path:
                             try:
                                 os.remove(mp4_path)
                             except OSError:
                                 pass
                     else:
-                        # Upload and send as file
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
                         if file_key:
-                            content = json.dumps({"file_key": file_key})
-                            await loop.run_in_executor(
-                                None, self._send_message_sync,
-                                receive_id_type, msg.chat_id, "file", content,
-                            )
+                            await _send("file", json.dumps({"file_key": file_key}))
 
             # --- Send text content (if any) ---
             if msg.content and msg.content.strip():
@@ -576,10 +619,11 @@ class FeishuChannel(BaseChannel):
                     "elements": elements,
                 }
                 content = json.dumps(card, ensure_ascii=False)
-                await loop.run_in_executor(
-                    None, self._send_message_sync,
-                    receive_id_type, msg.chat_id, "interactive", content,
-                )
+                sent_msg_id = await _send("interactive", content)
+
+                # Store message_id in metadata so callers can use it for threading
+                if sent_msg_id:
+                    msg.metadata["sent_message_id"] = sent_msg_id
 
         except Exception as e:
             logger.error(f"Error sending Feishu message: {e}")
@@ -619,10 +663,14 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type  # "p2p" or "group"
             msg_type = message.message_type
             
-            # In group chats, only respond when the bot is @mentioned
+            # In group chats, respond when:
+            # 1. Bot is @mentioned, OR
+            # 2. Message is a reply in a thread started/involving the bot
             if chat_type == "group" and self._bot_open_id:
-                if not self._is_bot_mentioned(message):
-                    logger.debug(f"Ignoring group message without bot mention: {message_id}")
+                is_mentioned = self._is_bot_mentioned(message)
+                is_thread = self._is_bot_thread(message)
+                if not is_mentioned and not is_thread:
+                    logger.debug(f"Ignoring group message without bot mention or thread: {message_id}")
                     return
             
             # Add reaction to indicate "seen"
@@ -654,15 +702,22 @@ class FeishuChannel(BaseChannel):
             
             # Forward to message bus
             reply_to = chat_id if chat_type == "group" else sender_id
+
+            # If this message is in a thread, pass the root_id so replies go to the same thread
+            root_id = getattr(message, "root_id", None) or getattr(message, "parent_id", None)
+            msg_metadata: dict[str, Any] = {
+                "message_id": message_id,
+                "chat_type": chat_type,
+                "msg_type": msg_type,
+            }
+            if root_id:
+                msg_metadata["reply_to"] = root_id
+
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=reply_to,
                 content=content,
-                metadata={
-                    "message_id": message_id,
-                    "chat_type": chat_type,
-                    "msg_type": msg_type,
-                }
+                metadata=msg_metadata,
             )
             
         except Exception as e:

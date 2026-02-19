@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import json_repair
+from loguru import logger
 from openai import AsyncOpenAI
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+# Retry configuration
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 2  # seconds, exponential backoff: 2, 4, 8
 
 
 class CustomProvider(LLMProvider):
@@ -23,10 +29,21 @@ class CustomProvider(LLMProvider):
                                   "max_tokens": max(1, max_tokens), "temperature": temperature}
         if tools:
             kwargs.update(tools=tools, tool_choice="auto")
-        try:
-            return self._parse(await self._client.chat.completions.create(**kwargs))
-        except Exception as e:
-            return LLMResponse(content=f"Error: {e}", finish_reason="error")
+
+        last_error: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return self._parse(await self._client.chat.completions.create(**kwargs))
+            except Exception as e:
+                last_error = e
+                if attempt < _MAX_RETRIES - 1:
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(f"LLM call failed (attempt {attempt + 1}/{_MAX_RETRIES}): {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"LLM call failed after {_MAX_RETRIES} attempts: {e}")
+
+        return LLMResponse(content=f"Error: {last_error}", finish_reason="error")
 
     def _parse(self, response: Any) -> LLMResponse:
         choice = response.choices[0]

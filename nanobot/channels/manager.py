@@ -197,10 +197,13 @@ class ChannelManager:
                 if channel:
                     try:
                         await channel.send(msg)
+                        msg.resolve()  # Signal completion to any awaiting caller
                     except Exception as e:
                         logger.error(f"Error sending to {msg.channel}: {e}")
+                        msg.resolve()  # Resolve even on error so callers don't hang
                 else:
                     logger.warning(f"Unknown channel: {msg.channel}")
+                    msg.resolve()
                     
             except asyncio.TimeoutError:
                 continue

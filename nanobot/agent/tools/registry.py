@@ -1,8 +1,16 @@
 """Tool registry for dynamic tool management."""
 
+import asyncio
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool
+
+# Default timeout for tool execution (seconds).
+# Individual tools (like exec) may have their own internal timeouts;
+# this is a safety net to prevent any tool from hanging indefinitely.
+DEFAULT_TOOL_TIMEOUT = 300  # 5 minutes
 
 
 class ToolRegistry:
@@ -12,8 +20,9 @@ class ToolRegistry:
     Allows dynamic registration and execution of tools.
     """
     
-    def __init__(self):
+    def __init__(self, default_timeout: int = DEFAULT_TOOL_TIMEOUT):
         self._tools: dict[str, Tool] = {}
+        self._default_timeout = default_timeout
     
     def register(self, tool: Tool) -> None:
         """Register a tool."""
@@ -57,7 +66,13 @@ class ToolRegistry:
             errors = tool.validate_params(params)
             if errors:
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors)
-            return await tool.execute(**params)
+            return await asyncio.wait_for(
+                tool.execute(**params),
+                timeout=self._default_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Tool '{name}' timed out after {self._default_timeout}s")
+            return f"Error: Tool '{name}' timed out after {self._default_timeout} seconds"
         except Exception as e:
             return f"Error executing {name}: {str(e)}"
     

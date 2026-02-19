@@ -13,13 +13,15 @@ from pathlib import Path
 _tool_channel: contextvars.ContextVar[str] = contextvars.ContextVar("tool_channel", default="")
 _tool_chat_id: contextvars.ContextVar[str] = contextvars.ContextVar("tool_chat_id", default="")
 _tool_sender_id: contextvars.ContextVar[str] = contextvars.ContextVar("tool_sender_id", default="")
+_tool_reply_to: contextvars.ContextVar[str] = contextvars.ContextVar("tool_reply_to", default="")
 
 
-def set_tool_context(channel: str, chat_id: str, sender_id: str = "") -> None:
+def set_tool_context(channel: str, chat_id: str, sender_id: str = "", reply_to: str = "") -> None:
     """Set the tool context for the current coroutine."""
     _tool_channel.set(channel)
     _tool_chat_id.set(chat_id)
     _tool_sender_id.set(sender_id)
+    _tool_reply_to.set(reply_to)
 
 
 def get_tool_channel() -> str:
@@ -35,6 +37,11 @@ def get_tool_chat_id() -> str:
 def get_tool_sender_id() -> str:
     """Get the current tool sender_id."""
     return _tool_sender_id.get()
+
+
+def get_tool_reply_to() -> str:
+    """Get the current tool reply_to (message_id to reply in thread)."""
+    return _tool_reply_to.get()
 
 
 def get_sender_display_name() -> str:

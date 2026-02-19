@@ -99,10 +99,18 @@ class ExecTool(Tool):
             
             result = "\n".join(output_parts) if output_parts else "(no output)"
             
-            # Truncate very long output
+            # Truncate very long output — keep head and tail for context
             max_len = 10000
             if len(result) > max_len:
-                result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
+                # Keep first 3000 and last 3000 chars, with a separator in between
+                head_len = 3000
+                tail_len = 3000
+                omitted = len(result) - head_len - tail_len
+                result = (
+                    result[:head_len]
+                    + f"\n\n... ({omitted} chars omitted) ...\n\n"
+                    + result[-tail_len:]
+                )
             
             return result
             

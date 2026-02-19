@@ -53,7 +53,12 @@ User ←→ Channel (feishu/telegram/...) ←→ MessageBus ←→ AgentLoop ←
 - Workspace: `~/.nanobot/workspace/`
 - Bootstrap files loaded into system prompt: `AGENTS.md`, `SOUL.md`, `USER.md`
 - Memory: `workspace/memory/MEMORY.md` (long-term), `workspace/memory/HISTORY.md` (event log)
+- Sessions: `workspace/sessions/` (JSONL files, one per session)
+- Subagent registry & logs: `workspace/subagents/` (`registry.json` + `<task_id>.log`)
+- Cron jobs: `~/.nanobot/data/cron/jobs.json`
 - Admin config: `workspace/admin.json` (admin_ids, protected_files, user_names)
+- Skills (user): `workspace/skills/{skill-name}/SKILL.md`
+- Skills (built-in): `nanobot/skills/`
 
 ## Key Design Decisions
 

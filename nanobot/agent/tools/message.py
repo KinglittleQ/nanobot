@@ -3,7 +3,7 @@
 from typing import Any, Callable, Awaitable
 
 from nanobot.agent.tools.base import Tool
-from nanobot.agent.tool_context import get_tool_channel, get_tool_chat_id
+from nanobot.agent.tool_context import get_tool_channel, get_tool_chat_id, get_tool_reply_to
 from nanobot.bus.events import OutboundMessage
 
 
@@ -84,6 +84,7 @@ class MessageTool(Tool):
             channel=channel,
             chat_id=chat_id,
             content=content,
+            reply_to=get_tool_reply_to() or None,
             media=media or []
         )
         

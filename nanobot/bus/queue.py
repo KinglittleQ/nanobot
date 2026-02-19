@@ -33,6 +33,21 @@ class MessageBus:
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish a response from the agent to channels."""
         await self.outbound.put(msg)
+
+    async def send_and_wait(self, msg: OutboundMessage, timeout: float = 30.0) -> dict:
+        """Publish an outbound message and wait for it to be sent by the channel.
+
+        Returns the message metadata (which may include ``sent_message_id``
+        set by the channel after sending).
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        msg.set_done_future(future)
+        await self.outbound.put(msg)
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            return msg.metadata
     
     async def consume_outbound(self) -> OutboundMessage:
         """Consume the next outbound message (blocks until available)."""
