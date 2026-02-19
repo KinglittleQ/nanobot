@@ -419,6 +419,22 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
+
+            # Send startup notification if configured
+            notify = config.gateway.startup_notify
+            if notify.enabled and notify.channel and notify.chat_id:
+                async def _send_startup_notify():
+                    """Wait for channel to be ready, then send notification."""
+                    await asyncio.sleep(3)  # Give channels time to connect
+                    from nanobot.bus.events import OutboundMessage
+                    await bus.publish_outbound(OutboundMessage(
+                        channel=notify.channel,
+                        chat_id=notify.chat_id,
+                        content=notify.message,
+                    ))
+                    console.print(f"[green]✓[/green] Startup notification sent to {notify.channel}:{notify.chat_id}")
+                asyncio.create_task(_send_startup_notify())
+
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),

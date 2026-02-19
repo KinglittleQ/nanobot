@@ -294,6 +294,9 @@ class FeishuChannel(BaseChannel):
     # Audio file extensions (Feishu only supports opus for audio messages)
     _AUDIO_EXTS = {".opus"}
 
+    # Video file extensions
+    _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
+
     # File type mapping for Feishu file upload API
     _FILE_TYPE_MAP = {
         ".opus": "opus", ".mp4": "mp4", ".pdf": "pdf", ".doc": "doc", ".docx": "doc",
@@ -350,6 +353,43 @@ class FeishuChannel(BaseChannel):
                     return None
         except Exception as e:
             logger.error(f"Error uploading file {file_path}: {e}")
+            return None
+
+    def _convert_to_mp4(self, file_path: str) -> str:
+        """Convert a video file to mp4 format if needed. Returns path to mp4 file."""
+        import os
+        import subprocess
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".mp4":
+            return file_path
+        mp4_path = os.path.splitext(file_path)[0] + ".mp4"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", file_path, "-c:v", "libx264", "-c:a", "aac", mp4_path],
+                capture_output=True, check=True, timeout=120,
+            )
+            logger.debug(f"Converted {file_path} to {mp4_path}")
+            return mp4_path
+        except Exception as e:
+            logger.error(f"Failed to convert video to mp4: {e}")
+            return file_path
+
+    def _extract_video_thumbnail(self, file_path: str) -> str | None:
+        """Extract a thumbnail from a video file. Returns path to thumbnail image."""
+        import os
+        import subprocess
+        thumb_path = os.path.splitext(file_path)[0] + "_thumb.png"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", file_path, "-ss", "00:00:01", "-vframes", "1", thumb_path],
+                capture_output=True, check=True, timeout=30,
+            )
+            if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
+                logger.debug(f"Extracted thumbnail: {thumb_path}")
+                return thumb_path
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract video thumbnail: {e}")
             return None
 
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
@@ -421,6 +461,36 @@ class FeishuChannel(BaseChannel):
                                 None, self._send_message_sync,
                                 receive_id_type, msg.chat_id, "audio", content,
                             )
+                    elif ext in self._VIDEO_EXTS:
+                        # Convert to mp4 if needed, extract thumbnail, upload and send as media (video)
+                        mp4_path = await loop.run_in_executor(None, self._convert_to_mp4, file_path)
+                        # Extract thumbnail for video cover
+                        thumb_path = await loop.run_in_executor(None, self._extract_video_thumbnail, mp4_path)
+                        image_key = ""
+                        if thumb_path:
+                            image_key = await loop.run_in_executor(None, self._upload_image_sync, thumb_path) or ""
+                            # Clean up thumbnail
+                            try:
+                                os.remove(thumb_path)
+                            except OSError:
+                                pass
+                        # Upload video file
+                        file_key = await loop.run_in_executor(None, self._upload_file_sync, mp4_path)
+                        if file_key:
+                            media_content = {"file_key": file_key}
+                            if image_key:
+                                media_content["image_key"] = image_key
+                            content = json.dumps(media_content)
+                            await loop.run_in_executor(
+                                None, self._send_message_sync,
+                                receive_id_type, msg.chat_id, "media", content,
+                            )
+                        # Clean up converted file
+                        if mp4_path != file_path:
+                            try:
+                                os.remove(mp4_path)
+                            except OSError:
+                                pass
                     else:
                         # Upload and send as file
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, file_path)

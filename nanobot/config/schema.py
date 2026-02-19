@@ -224,11 +224,21 @@ class ProvidersConfig(Base):
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
 
+class StartupNotifyConfig(Base):
+    """Startup notification configuration. Send a message when gateway starts."""
+
+    enabled: bool = False
+    channel: str = ""  # Channel to notify (e.g. "feishu", "telegram")
+    chat_id: str = ""  # Chat/user ID to notify
+    message: str = "🐈 nanobot 重启成功！"  # Notification message
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
     host: str = "0.0.0.0"
     port: int = 18790
+    startup_notify: StartupNotifyConfig = Field(default_factory=StartupNotifyConfig)
 
 
 class WebSearchConfig(Base):
