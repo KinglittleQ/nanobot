@@ -41,11 +41,28 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
     
+    def extend_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Append raw LLM messages (including tool calls/results) to the session.
+        
+        Each message gets a timestamp added if not already present.
+        This preserves the full conversation context including tool_calls,
+        tool_call_id, and tool results for context persistence across restarts.
+        """
+        now = datetime.now().isoformat()
+        for msg in messages:
+            if "timestamp" not in msg:
+                msg["timestamp"] = now
+            self.messages.append(msg)
+        self.updated_at = datetime.now()
+    
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Get recent messages in LLM format, preserving tool metadata."""
         out: list[dict[str, Any]] = []
         for m in self.messages[-max_messages:]:
-            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+            entry: dict[str, Any] = {"role": m["role"]}
+            # Only include content if present (some assistant msgs with tool_calls have no content)
+            if "content" in m:
+                entry["content"] = m["content"]
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
                     entry[k] = m[k]

@@ -169,7 +169,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str]]:
+    ) -> tuple[str | None, list[str], list[dict], bool]:
         """
         Run the agent iteration loop.
 
@@ -178,7 +178,9 @@ class AgentLoop:
             on_progress: Optional callback to push intermediate content to the user.
 
         Returns:
-            Tuple of (final_content, list_of_tools_used).
+            Tuple of (final_content, list_of_tools_used, full_messages, hit_max).
+            full_messages includes all messages from the loop (excluding system prompt).
+            hit_max is True if the loop exited because max_iterations was reached.
         """
         messages = initial_messages
         iteration = 0
@@ -235,7 +237,11 @@ class AgentLoop:
                 final_content = self._strip_think(response.content)
                 break
 
-        return final_content, tools_used
+        # Extract non-system messages for persistence
+        new_messages = [m for m in messages if m.get("role") != "system"]
+        hit_max = (iteration >= self.max_iterations and final_content is None)
+
+        return final_content, tools_used, new_messages, hit_max
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -343,19 +349,32 @@ class AgentLoop:
                 metadata=msg.metadata or {},
             ))
 
-        final_content, tools_used = await self._run_agent_loop(
+        final_content, tools_used, full_messages, hit_max = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
         if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+            if hit_max:
+                final_content = "⚠️ 达到最大迭代次数，任务可能未完成。"
+            else:
+                # Already responded via tool calls (e.g. message tool), no extra reply needed
+                # Still need to save messages to session
+                history_count = len(session.messages)
+                new_turn_messages = full_messages[history_count:]
+                session.extend_messages(new_turn_messages)
+                self.sessions.save(session)
+                return None
         
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
         
-        session.add_message("user", msg.content)
-        session.add_message("assistant", final_content,
-                            tools_used=tools_used if tools_used else None)
+        # Save complete messages (including tool calls/results) for context persistence
+        # full_messages already excludes the system prompt; it contains history + new turn
+        # We only need to save the new messages from this turn (not the history already in session)
+        history_count = len(session.messages)
+        # full_messages = [history...] + [new user msg] + [assistant/tool msgs...]
+        new_turn_messages = full_messages[history_count:]
+        session.extend_messages(new_turn_messages)
         self.sessions.save(session)
         
         return OutboundMessage(
@@ -393,13 +412,23 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        final_content, _ = await self._run_agent_loop(initial_messages)
+        final_content, _, full_messages, hit_max = await self._run_agent_loop(initial_messages)
 
         if final_content is None:
-            final_content = "Background task completed."
+            if hit_max:
+                final_content = "⚠️ 达到最大迭代次数，后台任务可能未完成。"
+            else:
+                final_content = "Background task completed."
         
-        session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", final_content)
+        # Save complete messages for context persistence
+        history_count = len(session.messages)
+        # Prepend system sender info to user message content
+        if full_messages and len(full_messages) > history_count:
+            first_new = full_messages[history_count]
+            if first_new.get("role") == "user":
+                first_new["content"] = f"[System: {msg.sender_id}] {first_new.get('content', '')}"
+        new_turn_messages = full_messages[history_count:]
+        session.extend_messages(new_turn_messages)
         self.sessions.save(session)
         
         return OutboundMessage(
@@ -439,10 +468,26 @@ class AgentLoop:
 
         lines = []
         for m in old_messages:
-            if not m.get("content"):
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            ts = m.get("timestamp", "?")[:16]
+            
+            # Skip tool results in consolidation summary (too verbose)
+            if role == "tool":
+                tool_name = m.get("name", "unknown")
+                lines.append(f"[{ts}] TOOL({tool_name}): [result omitted]")
+                continue
+            
+            # Assistant messages with tool_calls but no content
+            if role == "assistant" and not content and m.get("tool_calls"):
+                tool_names = [tc.get("function", {}).get("name", "?") for tc in m.get("tool_calls", [])]
+                lines.append(f"[{ts}] ASSISTANT: [called tools: {', '.join(tool_names)}]")
+                continue
+            
+            if not content:
                 continue
             tools = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
-            lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
+            lines.append(f"[{ts}] {role.upper()}{tools}: {content}")
         conversation = "\n".join(lines)
         current_memory = memory.read_long_term()
 
