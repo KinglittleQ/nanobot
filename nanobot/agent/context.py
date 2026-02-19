@@ -177,7 +177,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         
         if not images:
             return text
-        return images + [{"type": "text", "text": text}]
+        return [{"type": "text", "text": text}] + images
     
     def add_tool_result(
         self,

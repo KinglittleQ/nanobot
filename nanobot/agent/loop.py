@@ -91,7 +91,7 @@ class AgentLoop:
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
-        self.verbose_tool_output = False  # Default: brief mode
+        self.verbose_tool_output = False  # Default: brief mode (global fallback)
         self._session_locks: dict[str, asyncio.Lock] = {}  # Per-session locks
         self._concurrency_sem = asyncio.Semaphore(max_concurrent_sessions)
         self._start_time: float | None = None  # Set when run() starts
@@ -162,6 +162,15 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+
+    def _is_verbose(self, session: "Session") -> bool:
+        """Check if verbose tool output is enabled for this session."""
+        return session.metadata.get("verbose_tool_output", self.verbose_tool_output)
+
+    def _set_verbose(self, session: "Session", verbose: bool) -> None:
+        """Set verbose tool output for this session."""
+        session.metadata["verbose_tool_output"] = verbose
+        self.sessions.save(session)
 
     def _track_usage(self, session_key: str, usage: dict[str, int]) -> None:
         """Accumulate token usage for a session."""
@@ -322,7 +331,7 @@ class AgentLoop:
                     if on_progress:
                         detail = self._format_tool_detail(
                             tool_call.name, tool_call.arguments, result,
-                            verbose=self.verbose_tool_output,
+                            verbose=self._is_verbose(session) if session else self.verbose_tool_output,
                         )
                         await on_progress(detail)
                     messages = self.context.add_tool_result(
@@ -479,15 +488,15 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started. Memory consolidation in progress.")
         if cmd == "/help":
-            mode = "verbose 📝" if self.verbose_tool_output else "brief 📎"
+            mode = "verbose 📝" if self._is_verbose(session) else "brief 📎"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/verbose — Verbose tool output\n/brief — Brief tool output (one line)\n/help — Show available commands\n\nCurrent tool output mode: {mode}")
         if cmd == "/verbose":
-            self.verbose_tool_output = True
+            self._set_verbose(session, True)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="📝 Tool output mode: **verbose** (full details)")
         if cmd == "/brief":
-            self.verbose_tool_output = False
+            self._set_verbose(session, False)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="📎 Tool output mode: **brief** (one line per tool call)")
         if cmd == "/status":
@@ -576,7 +585,7 @@ class AgentLoop:
 
         # --- Model ---
         lines.append(f"🤖 Model: `{self.model}`")
-        mode = "verbose" if self.verbose_tool_output else "brief"
+        mode = "verbose" if self._is_verbose(session) else "brief"
         lines.append(f"🔧 Tool output: {mode}")
 
         # --- Session info ---

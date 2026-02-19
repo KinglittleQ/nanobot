@@ -203,7 +203,7 @@ class CronService:
         self._timer_task = asyncio.create_task(tick())
     
     async def _on_timer(self) -> None:
-        """Handle timer tick - run due jobs."""
+        """Handle timer tick - run due jobs concurrently."""
         if not self._store:
             return
         
@@ -213,8 +213,11 @@ class CronService:
             if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
         ]
         
-        for job in due_jobs:
-            await self._execute_job(job)
+        if due_jobs:
+            await asyncio.gather(
+                *(self._execute_job(job) for job in due_jobs),
+                return_exceptions=True,
+            )
         
         self._save_store()
         self._arm_timer()
