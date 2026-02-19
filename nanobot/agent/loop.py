@@ -138,14 +138,14 @@ class AgentLoop:
         await self._mcp_stack.__aenter__()
         await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
 
-    def _set_tool_context(self, channel: str, chat_id: str) -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, sender_id: str = "") -> None:
         """Update context for all tools that need routing info.
 
         Sets both the coroutine-local contextvars (used by concurrent
         sessions) and the legacy instance-level defaults.
         """
         # Coroutine-local context (safe for concurrent sessions)
-        set_tool_context(channel, chat_id)
+        set_tool_context(channel, chat_id, sender_id=sender_id)
 
         # Legacy instance-level defaults (kept for backward compatibility)
         if message_tool := self.tools.get("message"):
@@ -438,7 +438,7 @@ class AgentLoop:
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
 
-        self._set_tool_context(msg.channel, msg.chat_id)
+        self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id)
         initial_messages = self.context.build_messages(
             history=session.get_history(max_messages=self.memory_window),
             current_message=msg.content,

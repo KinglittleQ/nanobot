@@ -1,9 +1,13 @@
 """File system tools: read, write, edit."""
 
+import json
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tool_context import get_tool_sender_id
 
 
 def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
@@ -12,6 +16,53 @@ def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
     if allowed_dir and not str(resolved).startswith(str(allowed_dir.resolve())):
         raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
     return resolved
+
+
+# Default protected files (can be overridden by admin.json)
+_DEFAULT_PROTECTED_FILENAMES = {"SOUL.md", "AGENTS.md", "USER.md"}
+
+
+def _load_admin_config() -> dict:
+    """Load admin configuration from workspace admin.json."""
+    config_path = Path.home() / ".nanobot" / "workspace" / "admin.json"
+    if not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text())
+    except Exception as e:
+        logger.warning(f"Failed to load admin.json: {e}")
+        return {}
+
+
+def _check_protected_file(file_path: Path) -> str | None:
+    """Check if a file is protected and the current sender has permission.
+
+    Returns an error message string if access is denied, or None if allowed.
+    """
+    config = _load_admin_config()
+    protected = set(config.get("protected_files", _DEFAULT_PROTECTED_FILENAMES))
+
+    if file_path.name not in protected:
+        return None
+
+    admin_ids = config.get("admin_ids", [])
+
+    # If no admin config exists, allow all (backward compatible)
+    if not admin_ids:
+        return None
+
+    sender_id = get_tool_sender_id()
+    if sender_id in admin_ids:
+        return None
+
+    logger.warning(
+        f"Non-admin '{sender_id}' attempted to modify protected file: {file_path.name}"
+    )
+    return (
+        f"Error: {file_path.name} is a protected file. "
+        f"Only administrators can modify it. "
+        f"Current user '{sender_id}' does not have admin privileges."
+    )
 
 
 class ReadFileTool(Tool):
@@ -91,6 +142,8 @@ class WriteFileTool(Tool):
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
             file_path = _resolve_path(path, self._allowed_dir)
+            if err := _check_protected_file(file_path):
+                return err
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {path}"
@@ -140,6 +193,8 @@ class EditFileTool(Tool):
             file_path = _resolve_path(path, self._allowed_dir)
             if not file_path.exists():
                 return f"Error: File not found: {path}"
+            if err := _check_protected_file(file_path):
+                return err
             
             content = file_path.read_text(encoding="utf-8")
             
