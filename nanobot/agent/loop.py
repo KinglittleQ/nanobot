@@ -120,7 +120,10 @@ class AgentLoop:
         self.tools.register(WebFetchTool())
         
         # Message tool
-        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
+        message_tool = MessageTool(
+            send_callback=self.bus.publish_outbound,
+            send_and_wait=self.bus.send_and_wait,
+        )
         self.tools.register(message_tool)
         
         # Spawn tool (for subagents)
@@ -154,6 +157,7 @@ class AgentLoop:
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.set_context(channel, chat_id)
+                message_tool.reset_thread()  # New turn → new thread for proactive messages
 
         if spawn_tool := self.tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):
