@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import tempfile
 import time
 import uuid
 from datetime import datetime
@@ -148,7 +150,20 @@ class CronService:
             ]
         }
         
-        self.store_path.write_text(json.dumps(data, indent=2))
+        # Atomic write: write to temp file then rename to avoid corruption on crash
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.store_path.parent), suffix=".tmp"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, str(self.store_path))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     
     async def start(self) -> None:
         """Start the cron service."""

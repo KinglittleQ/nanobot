@@ -427,10 +427,15 @@ class AgentLoop:
             except asyncio.TimeoutError:
                 continue
 
-        # Wait for in-flight tasks on shutdown
+        # Wait for in-flight tasks on shutdown (with timeout)
         if tasks:
             logger.info(f"Waiting for {len(tasks)} in-flight tasks to complete...")
-            await asyncio.gather(*tasks, return_exceptions=True)
+            done, pending = await asyncio.wait(tasks, timeout=30)
+            if pending:
+                logger.warning(f"Shutdown timeout: cancelling {len(pending)} remaining tasks")
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
     
     async def close_mcp(self) -> None:
         """Close MCP connections."""

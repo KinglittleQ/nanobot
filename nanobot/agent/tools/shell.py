@@ -24,6 +24,7 @@ class ExecTool(Tool):
         self.working_dir = working_dir
         self.deny_patterns = deny_patterns or [
             r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
+            r"\brm\s+--(?:recursive|force)\b",  # rm --recursive, rm --force
             r"\bdel\s+/[fq]\b",              # del /f, del /q
             r"\brmdir\s+/s\b",               # rmdir /s
             r"\b(format|mkfs|diskpart)\b",   # disk operations
@@ -31,6 +32,8 @@ class ExecTool(Tool):
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
+            r"\bchmod\s+-R\s+777\s+/\s*$",   # chmod -R 777 /
+            r"\bchown\s+-R\s+.*\s+/\s*$",    # chown -R ... /
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
