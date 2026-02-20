@@ -47,9 +47,11 @@ User ←→ Channel (feishu/telegram/...) ←→ MessageBus ←→ AgentLoop ←
 - Tool context (channel/chat_id/sender_id) uses `contextvars` for coroutine isolation
 - Semaphore acquired **inside** session lock to avoid wasting slots
 
-## Configuration
+## Configuration & Data Paths
 
 - Config file: `~/.nanobot/config.json`
+- Config schema: `nanobot/config/schema.py` — `Config` class
+- Config loader: `nanobot/config/loader.py` — `load_config()`, `get_data_dir()`
 - Workspace: `~/.nanobot/workspace/`
 - Bootstrap files loaded into system prompt: `AGENTS.md`, `SOUL.md`, `USER.md`
 - Memory: `workspace/memory/MEMORY.md` (long-term), `workspace/memory/HISTORY.md` (event log)
@@ -59,6 +61,33 @@ User ←→ Channel (feishu/telegram/...) ←→ MessageBus ←→ AgentLoop ←
 - Admin config: `workspace/admin.json` (admin_ids, protected_files, user_names)
 - Skills (user): `workspace/skills/{skill-name}/SKILL.md`
 - Skills (built-in): `nanobot/skills/`
+
+## Key Code Locations
+
+| Feature | File | Function/Class |
+|---------|------|----------------|
+| Gateway entry point | `cli/commands.py` | `gateway()` |
+| Message processing | `agent/loop.py` | `_process_message()` |
+| LLM + tool loop | `agent/loop.py` | `_run_agent_loop()` |
+| Slash commands (/help, /status, /tasks) | `agent/loop.py` | `_process_message()` (top of method) |
+| Session lock & concurrency | `agent/loop.py` | `_handle_message()`, `_get_session_lock()` |
+| Token usage tracking | `agent/loop.py` | `_track_usage()`, `_build_status()` |
+| Memory consolidation | `agent/loop.py` | `_consolidate_memory()` |
+| System prompt assembly | `agent/context.py` | `ContextBuilder.build_messages()` |
+| Subagent spawn & resume | `agent/subagent.py` | `SubagentManager.spawn()`, `.resume()` |
+| Subagent persistence | `agent/subagent.py` | `_save_registry()`, `_load_registry()` |
+| Subagent thread output | `agent/subagent.py` | `_run_subagent()` → `_threaded_send()` |
+| Tool context (contextvars) | `agent/tool_context.py` | `set_tool_context()`, `get_tool_reply_to()` |
+| Protected file check | `agent/tools/filesystem.py` | `_check_protected_file()` |
+| LLM retry logic | `providers/custom_provider.py` | `chat()` retry loop |
+| LLM retry logic | `providers/litellm_provider.py` | `chat()` retry loop |
+| Tool timeout | `agent/tools/registry.py` | `execute()` → `asyncio.wait_for()` |
+| Session atomic save | `session/manager.py` | `save()` (temp file + `os.replace`) |
+| Session sanitize | `session/manager.py` | `_sanitize_messages()` |
+| Feishu thread reply | `channels/feishu.py` | `_reply_message_sync()`, `send()` |
+| Feishu thread detection | `channels/feishu.py` | `_is_bot_thread()`, `_on_message()` |
+| Cron job execution | `cron/service.py` | `_execute_job()`, `_on_timer()` |
+| Outbound send-and-wait | `bus/queue.py` | `MessageBus.send_and_wait()` |
 
 ## Key Design Decisions
 
