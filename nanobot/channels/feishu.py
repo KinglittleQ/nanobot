@@ -538,7 +538,11 @@ class FeishuChannel(BaseChannel):
             return None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Feishu, including media (images/files) if present."""
+        """Send a message through Feishu, including media (images/files) if present.
+
+        When both text and media are present, the text is sent first and
+        media items are threaded under it so they appear in a single topic.
+        """
         if not self._client:
             logger.warning("Feishu client not initialized")
             return
@@ -547,7 +551,6 @@ class FeishuChannel(BaseChannel):
             import os
 
             # Determine receive_id_type based on chat_id format
-            # open_id starts with "ou_", chat_id starts with "oc_"
             if msg.chat_id.startswith("oc_"):
                 receive_id_type = "chat_id"
             else:
@@ -556,11 +559,12 @@ class FeishuChannel(BaseChannel):
             loop = asyncio.get_running_loop()
             reply_to = msg.reply_to or msg.metadata.get("reply_to")
 
-            # Helper: send or reply depending on whether we have a thread root
-            async def _send(msg_type: str, content: str) -> str | None:
-                if reply_to:
+            # Helper: send a new message or reply in thread
+            async def _send(msg_type: str, content: str, thread_id: str | None = None) -> str | None:
+                target = thread_id or reply_to
+                if target:
                     return await loop.run_in_executor(
-                        None, self._reply_message_sync, reply_to, msg_type, content,
+                        None, self._reply_message_sync, target, msg_type, content,
                     )
                 else:
                     return await loop.run_in_executor(
@@ -568,7 +572,23 @@ class FeishuChannel(BaseChannel):
                         receive_id_type, msg.chat_id, msg_type, content,
                     )
 
-            # --- Send media attachments first ---
+            # --- Send text content first (if any) to establish thread root ---
+            thread_root: str | None = None
+            if msg.content and msg.content.strip():
+                elements = self._build_card_elements(msg.content)
+                card = {
+                    "config": {"wide_screen_mode": True},
+                    "elements": elements,
+                }
+                content = json.dumps(card, ensure_ascii=False)
+                sent_msg_id = await _send("interactive", content)
+                if sent_msg_id:
+                    msg.metadata["sent_message_id"] = sent_msg_id
+                    # Use this message as thread root for subsequent media
+                    if not reply_to:
+                        thread_root = sent_msg_id
+
+            # --- Send media attachments (threaded under text if applicable) ---
             if msg.media:
                 for file_path in msg.media:
                     if not os.path.isfile(file_path):
@@ -579,11 +599,15 @@ class FeishuChannel(BaseChannel):
                     if ext in self._IMAGE_EXTS:
                         image_key = await loop.run_in_executor(None, self._upload_image_sync, file_path)
                         if image_key:
-                            await _send("image", json.dumps({"image_key": image_key}))
+                            mid = await _send("image", json.dumps({"image_key": image_key}), thread_root)
+                            if mid and not thread_root and not reply_to:
+                                thread_root = mid
                     elif ext in self._AUDIO_EXTS:
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
                         if file_key:
-                            await _send("audio", json.dumps({"file_key": file_key}))
+                            mid = await _send("audio", json.dumps({"file_key": file_key}), thread_root)
+                            if mid and not thread_root and not reply_to:
+                                thread_root = mid
                     elif ext in self._VIDEO_EXTS:
                         mp4_path = await loop.run_in_executor(None, self._convert_to_mp4, file_path)
                         thumb_path = await loop.run_in_executor(None, self._extract_video_thumbnail, mp4_path)
@@ -599,7 +623,9 @@ class FeishuChannel(BaseChannel):
                             media_content = {"file_key": file_key}
                             if image_key:
                                 media_content["image_key"] = image_key
-                            await _send("media", json.dumps(media_content))
+                            mid = await _send("media", json.dumps(media_content), thread_root)
+                            if mid and not thread_root and not reply_to:
+                                thread_root = mid
                         if mp4_path != file_path:
                             try:
                                 os.remove(mp4_path)
@@ -608,22 +634,9 @@ class FeishuChannel(BaseChannel):
                     else:
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
                         if file_key:
-                            await _send("file", json.dumps({"file_key": file_key}))
-
-            # --- Send text content (if any) ---
-            if msg.content and msg.content.strip():
-                # Build card with markdown + table support
-                elements = self._build_card_elements(msg.content)
-                card = {
-                    "config": {"wide_screen_mode": True},
-                    "elements": elements,
-                }
-                content = json.dumps(card, ensure_ascii=False)
-                sent_msg_id = await _send("interactive", content)
-
-                # Store message_id in metadata so callers can use it for threading
-                if sent_msg_id:
-                    msg.metadata["sent_message_id"] = sent_msg_id
+                            mid = await _send("file", json.dumps({"file_key": file_key}), thread_root)
+                            if mid and not thread_root and not reply_to:
+                                thread_root = mid
 
         except Exception as e:
             logger.error(f"Error sending Feishu message: {e}")
