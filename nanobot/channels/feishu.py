@@ -296,21 +296,7 @@ class FeishuChannel(BaseChannel):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
     
-    # Patterns that benefit from card rendering (markdown formatting)
-    _NEEDS_CARD_RE = re.compile(
-        r"```|^\|.+\|$|^#{1,6}\s|^\*\*|!\[",  # code block, table, heading, bold, image
-        re.MULTILINE,
-    )
-
-    def _should_use_card(self, content: str) -> bool:
-        """Decide whether content needs card (interactive) or plain text."""
-        # Long messages benefit from card formatting
-        if len(content) > 500:
-            return True
-        # Messages with markdown formatting need card rendering
-        if self._NEEDS_CARD_RE.search(content):
-            return True
-        return False
+    # Regex to match markdown tables (header + separator + data rows)
     _TABLE_RE = re.compile(
         r"((?:^[ \t]*\|.+\|[ \t]*\n)(?:^[ \t]*\|[-:\s|]+\|[ \t]*\n)(?:^[ \t]*\|.+\|[ \t]*\n?)+)",
         re.MULTILINE,
@@ -589,24 +575,16 @@ class FeishuChannel(BaseChannel):
             # --- Send text content first (if any) to establish thread root ---
             thread_root: str | None = None
             if msg.content and msg.content.strip():
-                text = msg.content.strip()
-
-                if self._should_use_card(text):
-                    # Rich content → interactive card
-                    elements = self._build_card_elements(text)
-                    card = {
-                        "config": {"wide_screen_mode": True},
-                        "elements": elements,
-                    }
-                    content = json.dumps(card, ensure_ascii=False)
-                    sent_msg_id = await _send("interactive", content)
-                else:
-                    # Plain short text → text message (easy to copy)
-                    content = json.dumps({"text": text})
-                    sent_msg_id = await _send("text", content)
-
+                elements = self._build_card_elements(msg.content)
+                card = {
+                    "config": {"wide_screen_mode": True},
+                    "elements": elements,
+                }
+                content = json.dumps(card, ensure_ascii=False)
+                sent_msg_id = await _send("interactive", content)
                 if sent_msg_id:
                     msg.metadata["sent_message_id"] = sent_msg_id
+                    # Use this message as thread root for subsequent media
                     if not reply_to:
                         thread_root = sent_msg_id
 
