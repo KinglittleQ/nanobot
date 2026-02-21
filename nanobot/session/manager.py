@@ -282,13 +282,20 @@ class SessionManager:
             dir=str(self.sessions_dir), suffix=".tmp"
         )
         try:
+            # Parse channel and chat_id from session key for reliable resume
+            key_parts = session.key.split(":", 1)
+            channel = key_parts[0] if len(key_parts) == 2 else ""
+            chat_id = key_parts[1] if len(key_parts) == 2 else session.key
+
             with os.fdopen(fd, "w") as f:
                 metadata_line = {
                     "_type": "metadata",
                     "created_at": session.created_at.isoformat(),
                     "updated_at": session.updated_at.isoformat(),
                     "metadata": session.metadata,
-                    "last_consolidated": session.last_consolidated
+                    "last_consolidated": session.last_consolidated,
+                    "channel": channel,
+                    "chat_id": chat_id,
                 }
                 f.write(json.dumps(metadata_line) + "\n")
                 for msg in session.messages:
@@ -324,8 +331,15 @@ class SessionManager:
                     if first_line:
                         data = json.loads(first_line)
                         if data.get("_type") == "metadata":
+                            # Use channel:chat_id from metadata if available
+                            channel = data.get("channel", "")
+                            chat_id = data.get("chat_id", "")
+                            if channel and chat_id:
+                                key = f"{channel}:{chat_id}"
+                            else:
+                                key = path.stem.replace("_", ":", 1)
                             sessions.append({
-                                "key": path.stem.replace("_", ":"),
+                                "key": key,
                                 "created_at": data.get("created_at"),
                                 "updated_at": data.get("updated_at"),
                                 "path": str(path)

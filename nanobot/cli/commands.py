@@ -416,6 +416,22 @@ def gateway(
     console.print(f"[green]✓[/green] Heartbeat: every 30m")
     
     async def run():
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+        _channels_task: asyncio.Task | None = None
+
+        def _signal_handler():
+            """Handle SIGTERM/SIGINT for graceful shutdown."""
+            if shutdown_event.is_set():
+                return  # Already shutting down, ignore repeated signals
+            console.print("\n[yellow]Received shutdown signal, gracefully stopping...[/yellow]")
+            agent.stop()  # Sets _running = False, agent.run() will exit its loop
+            shutdown_event.set()
+
+        # Register signal handlers via the event loop (asyncio-safe)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _signal_handler)
+
         try:
             await cron.start()
             await heartbeat.start()
@@ -448,13 +464,29 @@ def gateway(
                     else:
                         # Broadcast to all existing sessions (except cli:direct)
                         for path in agent.sessions.sessions_dir.glob("*.jsonl"):
-                            stem = path.stem  # e.g. "feishu_ou_4ab6c4916575f4780a9c69310e5d3e97"
+                            stem = path.stem
                             if stem == "cli_direct" or not stem:
                                 continue
-                            # Split on first underscore only: channel_chatid
-                            parts = stem.split("_", 1)
-                            if len(parts) == 2:
-                                targets.append((parts[0], parts[1]))
+                            # Try reading channel/chat_id from session metadata
+                            ch_from_meta, cid_from_meta = None, None
+                            try:
+                                with open(path) as sf:
+                                    first = sf.readline().strip()
+                                    if first:
+                                        import json as _json
+                                        meta = _json.loads(first)
+                                        if meta.get("_type") == "metadata":
+                                            ch_from_meta = meta.get("channel")
+                                            cid_from_meta = meta.get("chat_id")
+                            except Exception:
+                                pass
+                            if ch_from_meta and cid_from_meta:
+                                targets.append((ch_from_meta, cid_from_meta))
+                            else:
+                                # Fallback: split filename on first underscore
+                                parts = stem.split("_", 1)
+                                if len(parts) == 2:
+                                    targets.append((parts[0], parts[1]))
 
                     for ch, cid in targets:
                         try:
@@ -469,18 +501,51 @@ def gateway(
 
                 _startup_task = asyncio.create_task(_send_startup_notify())  # prevent GC
 
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            # Run agent and channels concurrently.
+            # agent.run() will return when _running is set to False (by signal handler).
+            # channels.start_all() runs forever, so we wrap it in a task to cancel later.
+            _channels_task = asyncio.create_task(channels.start_all())
+
+            # Wait for agent.run() to finish (it exits after draining in-flight tasks)
+            await agent.run()
+
         except KeyboardInterrupt:
-            console.print("\nShutting down...")
+            console.print("\n[yellow]Shutting down...[/yellow]")
         finally:
-            await agent.close_mcp()
+            # Remove signal handlers to avoid interference during cleanup
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.remove_signal_handler(sig)
+
+            # 1. Stop accepting new work
+            console.print("[dim]Stopping cron and heartbeat...[/dim]")
             heartbeat.stop()
             cron.stop()
-            agent.stop()
+
+            # 2. Stop channels (stops receiving new messages and sending outbound)
+            console.print("[dim]Stopping channels...[/dim]")
+            if _channels_task and not _channels_task.done():
+                _channels_task.cancel()
+                try:
+                    await _channels_task
+                except asyncio.CancelledError:
+                    pass
             await channels.stop_all()
+
+            # 3. Close MCP connections
+            console.print("[dim]Closing MCP connections...[/dim]")
+            await agent.close_mcp()
+
+            # 4. Cancel any remaining asyncio tasks spawned by us
+            #    (e.g. _resume_task, _startup_task that may still be pending)
+            remaining = [t for t in asyncio.all_tasks(loop)
+                         if t is not asyncio.current_task() and not t.done()]
+            if remaining:
+                console.print(f"[dim]Cancelling {len(remaining)} remaining task(s)...[/dim]")
+                for t in remaining:
+                    t.cancel()
+                await asyncio.gather(*remaining, return_exceptions=True)
+
+            console.print("[green]✓[/green] Shutdown complete.")
     
     asyncio.run(run())
 

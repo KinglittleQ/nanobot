@@ -23,17 +23,39 @@ class ExecTool(Tool):
         self.timeout = timeout
         self.working_dir = working_dir
         self.deny_patterns = deny_patterns or [
-            r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
-            r"\brm\s+--(?:recursive|force)\b",  # rm --recursive, rm --force
-            r"\bdel\s+/[fq]\b",              # del /f, del /q
-            r"\brmdir\s+/s\b",               # rmdir /s
-            r"\b(format|mkfs|diskpart)\b",   # disk operations
-            r"\bdd\s+if=",                   # dd
-            r">\s*/dev/sd",                  # write to disk
-            r"\b(shutdown|reboot|poweroff)\b",  # system power
-            r":\(\)\s*\{.*\};\s*:",          # fork bomb
-            r"\bchmod\s+-R\s+777\s+/\s*$",   # chmod -R 777 /
-            r"\bchown\s+-R\s+.*\s+/\s*$",    # chown -R ... /
+            # --- rm variants ---
+            r"\brm\s+-[rf]{1,2}\b",                    # rm -r, rm -rf, rm -fr
+            r"\brm\s+(-\w*\s+)*--recursive\b",         # rm --recursive (with optional short flags)
+            r"\brm\s+(-\w*\s+)*--force\b",             # rm --force (with optional short flags)
+            r"\brm\s+--no-preserve-root\b",            # rm --no-preserve-root
+            # --- Windows delete ---
+            r"\bdel\s+/[fq]\b",                        # del /f, del /q
+            r"\brmdir\s+/s\b",                         # rmdir /s
+            # --- Disk / filesystem destruction ---
+            r"\bmkfs\b",                               # mkfs, mkfs.ext4, etc.
+            r"\b(format|diskpart)\b",                  # Windows disk operations
+            r"\bdd\b.*\bof\s*=\s*/dev/",               # dd ... of=/dev/...
+            r"\bdd\b.*\bif\s*=\s*/dev/zero\b",         # dd if=/dev/zero (wipe)
+            r"\bdd\b.*\bif\s*=\s*/dev/urandom\b",      # dd if=/dev/urandom (wipe)
+            # --- Direct device writes (exclude safe: /dev/null, /dev/std*, /dev/tty, /dev/pts) ---
+            r">\s*/dev/(?!null|std|tty|pts|fd)[a-z]",  # > /dev/sda, > /dev/nvme, > /dev/loop, etc.
+            r"\btee\s+/dev/(?!null|std|tty|pts|fd)[a-z]",  # tee /dev/sda
+            # --- System power ---
+            r"\b(shutdown|reboot|poweroff|halt|init\s+[06])\b",
+            # --- Fork bomb ---
+            r":\(\)\s*\{.*\};\s*:",                    # classic :(){ :|:& };:
+            r"\.\(\)\s*\{.*\};\s*\.",                  # dot variant .(){ .|.& };.
+            r"\bfork\s*bomb\b",                        # literal mention (script names)
+            # --- chmod on system directories ---
+            r"\bchmod\s+(-[a-zA-Z]*\s+)*[0-7]{3,4}\s+/(bin|boot|dev|etc|lib|lib64|proc|root|run|sbin|srv|sys|usr|var)(/|\s|$)",
+            r"\bchmod\s+(-[a-zA-Z]*\s+)*[0-7]{3,4}\s+/\s*$",  # chmod 777 /
+            r"\bchmod\s+(-[a-zA-Z]*\s+)*[0-7]{3,4}\s+/\s*;",  # chmod 777 / ; ...
+            # --- chown on system directories ---
+            r"\bchown\s+(-[a-zA-Z]*\s+)*\S+\s+/(bin|boot|dev|etc|lib|lib64|proc|root|run|sbin|srv|sys|usr|var)(/|\s|$)",
+            r"\bchown\s+(-[a-zA-Z]*\s+)*\S+\s+/\s*$",         # chown user /
+            # --- Dangerous system commands ---
+            r"\bsysctl\s+-w\b",                        # sysctl kernel param writes
+            r"\biptables\s+-F\b",                      # flush firewall rules
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace

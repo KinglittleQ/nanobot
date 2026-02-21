@@ -575,13 +575,20 @@ class FeishuChannel(BaseChannel):
             # --- Send text content first (if any) to establish thread root ---
             thread_root: str | None = None
             if msg.content and msg.content.strip():
-                elements = self._build_card_elements(msg.content)
-                card = {
-                    "config": {"wide_screen_mode": True},
-                    "elements": elements,
-                }
-                content = json.dumps(card, ensure_ascii=False)
-                sent_msg_id = await _send("interactive", content)
+                text = msg.content.strip()
+                # Short plain messages (≤200 chars, no markdown) → plain text
+                _has_md = re.search(r"\*\*|```|^#{1,6}\s|\|", text, re.MULTILINE)
+                if len(text) <= 200 and not _has_md:
+                    content = json.dumps({"text": text})
+                    sent_msg_id = await _send("text", content)
+                else:
+                    elements = self._build_card_elements(text)
+                    card = {
+                        "config": {"wide_screen_mode": True},
+                        "elements": elements,
+                    }
+                    content = json.dumps(card, ensure_ascii=False)
+                    sent_msg_id = await _send("interactive", content)
                 if sent_msg_id:
                     msg.metadata["sent_message_id"] = sent_msg_id
                     # Use this message as thread root for subsequent media
