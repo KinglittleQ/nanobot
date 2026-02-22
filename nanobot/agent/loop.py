@@ -60,9 +60,11 @@ DEFAULT_CONTEXT_WINDOW = 128_000  # Fallback for unknown models
 # cache_write/cache_read are None if caching is not supported.
 MODEL_PRICING: dict[str, tuple[float, float, float | None, float | None]] = {
     # Claude models (Anthropic pricing)
+    "claude-opus-4.6":  (5.0,   25.0, 6.25,  0.50),
+    "claude-opus-4.5":  (5.0,   25.0, 6.25,  0.50),
     "claude-opus-4":    (15.0,  75.0, 18.75, 1.50),
     "claude-sonnet-4":  (3.0,   15.0, 3.75,  0.30),
-    "claude-haiku-3.5": (0.80,  4.0,  1.0,   0.08),
+    "claude-haiku":     (0.80,  4.0,  1.0,   0.08),
     # OpenAI models
     "gpt-4o":           (2.50,  10.0, None,   None),
     "gpt-4o-mini":      (0.15,  0.60, None,   None),
