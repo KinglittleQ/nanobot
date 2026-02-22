@@ -43,6 +43,42 @@ MSG_TYPE_MAP = {
 }
 
 
+def _extract_post_images(content_json: dict) -> list[str]:
+    """Extract image keys from Feishu post (rich text) message content.
+    
+    Returns a list of image_key strings found in the post.
+    """
+    image_keys: list[str] = []
+    
+    def _extract_from_content(content: dict) -> None:
+        content_blocks = content.get("content", [])
+        if not isinstance(content_blocks, list):
+            return
+        for block in content_blocks:
+            if isinstance(block, list):
+                for element in block:
+                    if isinstance(element, dict) and element.get("tag") == "img":
+                        key = element.get("image_key")
+                        if key:
+                            image_keys.append(key)
+            elif isinstance(block, dict) and block.get("tag") == "img":
+                key = block.get("image_key")
+                if key:
+                    image_keys.append(key)
+    
+    # Try direct format
+    if "content" in content_json:
+        _extract_from_content(content_json)
+    
+    # Try localized format
+    for lang_key in ("zh_cn", "en_us", "ja_jp"):
+        lang_content = content_json.get(lang_key)
+        if lang_content and isinstance(lang_content, dict):
+            _extract_from_content(lang_content)
+    
+    return image_keys
+
+
 def _extract_post_text(content_json: dict) -> str:
     """Extract plain text from Feishu post (rich text) message content.
     
@@ -828,6 +864,21 @@ class FeishuChannel(BaseChannel):
                     content_json = json.loads(message.content)
                     logger.info(f"Post content JSON: {json.dumps(content_json, ensure_ascii=False)[:1000]}")
                     content = _extract_post_text(content_json)
+                    # Also extract and download images from post content
+                    image_keys = _extract_post_images(content_json)
+                    for image_key in image_keys:
+                        loop = asyncio.get_running_loop()
+                        local_path = await loop.run_in_executor(
+                            None, self._download_resource_sync,
+                            message_id, image_key, "image"
+                        )
+                        if not local_path:
+                            local_path = await loop.run_in_executor(
+                                None, self._download_image_sync, image_key
+                            )
+                        if local_path:
+                            media_files.append(local_path)
+                            logger.info(f"Downloaded post image {image_key} → {local_path}")
                 except (json.JSONDecodeError, TypeError):
                     content = message.content or ""
             elif msg_type == "image":
