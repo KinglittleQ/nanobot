@@ -28,6 +28,9 @@ class CustomProvider(LLMProvider):
                    model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7) -> LLMResponse:
         effective_model = model or self.default_model
 
+        # Sanitize tool call IDs in message history for Claude compatibility
+        messages = self._sanitize_tool_call_ids_in_messages(messages)
+
         # Inject cache_control breakpoints for Anthropic prompt caching
         if self._cache_enabled or "cache" in (effective_model or "").lower():
             messages = self._inject_cache_control(messages)
@@ -115,6 +118,40 @@ class CustomProvider(LLMProvider):
         # Replace any character that doesn't match the allowed pattern with underscore
         sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', str(tool_call_id))
         return sanitized
+
+    @classmethod
+    def _sanitize_tool_call_ids_in_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Sanitize all tool call IDs in message history.
+        
+        This ensures that any tool_calls in assistant messages and tool_call_id
+        in tool messages conform to Claude's ID pattern requirements.
+        """
+        sanitized_messages = []
+        for msg in messages:
+            msg_copy = msg.copy()
+            role = msg_copy.get("role")
+            
+            # Sanitize tool_calls in assistant messages
+            if role == "assistant" and msg_copy.get("tool_calls"):
+                msg_copy["tool_calls"] = [
+                    {
+                        **tc,
+                        "id": cls._sanitize_tool_call_id(tc.get("id", "")),
+                        "function": {
+                            **tc.get("function", {}),
+                            "arguments": tc.get("function", {}).get("arguments", "{}")
+                        }
+                    }
+                    for tc in msg_copy["tool_calls"]
+                ]
+            
+            # Sanitize tool_call_id in tool messages
+            if role == "tool" and msg_copy.get("tool_call_id"):
+                msg_copy["tool_call_id"] = cls._sanitize_tool_call_id(msg_copy["tool_call_id"])
+            
+            sanitized_messages.append(msg_copy)
+        
+        return sanitized_messages
 
     def _parse(self, response: Any) -> LLMResponse:
         choice = response.choices[0]
