@@ -560,7 +560,8 @@ class AgentLoop:
                     response = await self._process_message(msg)
                     if response:
                         # Auto-set reply_to from inbound message metadata if not already set
-                        if not response.reply_to and msg.metadata:
+                        # (reply_to=None means not set; reply_to="" means explicitly no thread)
+                        if response.reply_to is None and msg.metadata:
                             response.reply_to = msg.metadata.get("reply_to") or msg.metadata.get("message_id")
                         await self.bus.publish_outbound(response)
                 except Exception as e:
@@ -569,7 +570,6 @@ class AgentLoop:
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=f"Sorry, I encountered an error: {str(e)}",
-                        reply_to=(msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id"),
                     ))
 
         # Clean up lock if no other task is waiting on it
