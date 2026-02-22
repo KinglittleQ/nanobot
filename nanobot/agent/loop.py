@@ -699,16 +699,6 @@ class AgentLoop:
         if cmd.startswith("/tasks"):
             return await self._handle_tasks_command(cmd, msg)
         
-        if len(session.messages) > self.memory_window:
-            # Consolidation runs in background but needs session lock to avoid
-            # racing with message processing.  Acquire the same per-session lock.
-            async def _safe_consolidate():
-                lock = self._get_session_lock(key)
-                async with lock:
-                    await self._consolidate_memory(session)
-                self._release_session_lock(key)
-            asyncio.create_task(_safe_consolidate())
-
         # Determine reply_to: thread root if in thread, otherwise user's message_id
         _reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id") or ""
         # If thread mode is disabled, don't reply in thread
