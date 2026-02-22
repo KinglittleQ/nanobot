@@ -340,8 +340,15 @@ class FeishuChannel(BaseChannel):
         if len(lines) < 3:
             return None
         split = lambda l: [c.strip() for c in l.strip("|").split("|")]
-        headers = split(lines[0])
-        rows = [split(l) for l in lines[2:]]
+        # Strip inline markdown formatting from cell text (bold, italic, code)
+        # Feishu table cells are plain text and don't render markdown
+        def clean_cell(text: str) -> str:
+            text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # **bold** → bold
+            text = re.sub(r"\*(.+?)\*", r"\1", text)      # *italic* → italic
+            text = re.sub(r"`(.+?)`", r"\1", text)        # `code` → code
+            return text.strip()
+        headers = [clean_cell(h) for h in split(lines[0])]
+        rows = [[clean_cell(c) for c in split(l)] for l in lines[2:]]
         columns = [{"tag": "column", "name": f"c{i}", "display_name": h, "width": "auto"}
                    for i, h in enumerate(headers)]
         return {
