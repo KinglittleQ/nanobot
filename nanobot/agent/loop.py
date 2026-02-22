@@ -939,6 +939,18 @@ class AgentLoop:
         else:
             lines.append(f"\n📊 **Token Usage (this session)**: no data yet")
 
+        # --- Per-session token usage breakdown ---
+        other_sessions = {k: v for k, v in self._usage_stats.items() if k != session_key and v.get("llm_calls", 0) > 0}
+        if other_sessions:
+            lines.append(f"\n📊 **Other Sessions**")
+            for skey, sus in sorted(other_sessions.items(), key=lambda x: x[1].get("total_tokens", 0), reverse=True):
+                s_cost = self._calculate_cost(sus)
+                cost_str = f" ${s_cost['cost_total']:.4f}" if s_cost else ""
+                s_cache_read = sus.get('cache_read_tokens', 0)
+                s_uncached = sus.get('uncached_input_tokens', 0)
+                cache_pct = s_cache_read * 100 // max(1, sus['prompt_tokens'])
+                lines.append(f"  `{skey}`: {sus['llm_calls']} calls, in={sus['prompt_tokens']:,}(cache {cache_pct}%), out={sus['completion_tokens']:,}{cost_str}")
+
         # --- Global token usage ---
         global_usage = self._get_global_usage()
         if global_usage["llm_calls"] > 0:
