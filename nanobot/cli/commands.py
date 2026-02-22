@@ -396,7 +396,7 @@ def gateway(
         if job.payload.deliver and job.payload.channel and job.payload.to:
             main_session_key = f"{job.payload.channel}:{job.payload.to}"
             main_session = session_manager.get_or_create(main_session_key)
-            recent = main_session.get_history(max_messages=100)
+            recent = main_session.get_history(max_messages=16)
             if recent:
                 context_lines = []
                 for m in recent:
@@ -411,7 +411,7 @@ def gateway(
                     ts_prefix = f" [{ts}]" if ts else ""
                     context_lines.append(f"[{role}]{ts_prefix} {preview}")
                 if context_lines:
-                    context_summary = "\n".join(context_lines[-100:])  # Last 100 non-tool messages
+                    context_summary = "\n".join(context_lines[-16:])  # Last 16 non-tool messages
                     message = (
                         f"[主对话上下文（只读参考，不要回复这些内容）]\n"
                         f"{context_summary}\n\n"
