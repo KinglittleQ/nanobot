@@ -31,6 +31,7 @@ from nanobot.session.manager import Session, SessionManager
 # Used to trigger memory consolidation when prompt_tokens exceeds 80% of the window.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Claude models
+    "-1m": 1_000_000,  # Any model with -1M suffix (e.g. claude-opus-4.6-cache-1M)
     "claude-opus": 200_000,
     "claude-sonnet": 200_000,
     "claude-haiku": 200_000,
@@ -60,6 +61,7 @@ DEFAULT_CONTEXT_WINDOW = 128_000  # Fallback for unknown models
 # cache_write/cache_read are None if caching is not supported.
 MODEL_PRICING: dict[str, tuple[float, float, float | None, float | None]] = {
     # Claude models (Anthropic pricing)
+    "claude-opus-4.6-cache-1m": (10.0, 37.5, 12.5, 1.0),
     "claude-opus-4.6":  (5.0,   25.0, 6.25,  0.50),
     "claude-opus-4.5":  (5.0,   25.0, 6.25,  0.50),
     "claude-opus-4":    (15.0,  75.0, 18.75, 1.50),
