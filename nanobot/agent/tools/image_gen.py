@@ -94,11 +94,22 @@ class ImageGenTool(Tool):
             _, b64data = img_url.split(",", 1)
             img_bytes = base64.b64decode(b64data)
 
-            # Save to temp file
+            # Save to temp file (and clean up old generated images)
             import tempfile
+            import time
+
+            tmp_dir = tempfile.gettempdir()
+            cutoff = time.time() - 24 * 3600  # 24 hours ago
+            for old_file in Path(tmp_dir).glob("image_gen_*.png"):
+                try:
+                    if old_file.stat().st_mtime < cutoff:
+                        old_file.unlink()
+                        logger.debug(f"Cleaned up old image: {old_file}")
+                except OSError:
+                    pass
 
             output_path = os.path.join(
-                tempfile.gettempdir(), f"image_gen_{os.getpid()}_{id(img_bytes)}.png"
+                tmp_dir, f"image_gen_{os.getpid()}_{id(img_bytes)}.png"
             )
             with open(output_path, "wb") as f:
                 f.write(img_bytes)
