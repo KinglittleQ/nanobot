@@ -336,6 +336,7 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
+    from loguru import logger
     
     if verbose:
         import logging
@@ -344,6 +345,21 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     
     config = load_config()
+
+    # Set up file logging: ~/.nanobot/logs/gateway.log with daily rotation
+    log_dir = get_data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        str(log_dir / "gateway_{time:YYYY-MM-DD}.log"),
+        rotation="00:00",      # New file at midnight
+        retention="30 days",   # Keep 30 days of logs
+        compression="gz",     # Compress old logs
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{function}:{line} - {message}",
+        enqueue=True,          # Thread-safe async logging
+    )
+    logger.info(f"Log file: {log_dir}/gateway_*.log")
+
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
