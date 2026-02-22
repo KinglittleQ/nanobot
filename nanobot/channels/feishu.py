@@ -815,9 +815,17 @@ class FeishuChannel(BaseChannel):
                     image_key = json.loads(message.content).get("image_key", "")
                     if image_key:
                         loop = asyncio.get_running_loop()
+                        # Use GetMessageResourceRequest (message_id + file_key) to download
+                        # user-sent images. GetImageRequest only works for bot-uploaded images.
                         local_path = await loop.run_in_executor(
-                            None, self._download_image_sync, image_key
+                            None, self._download_resource_sync,
+                            message_id, image_key, "image"
                         )
+                        if not local_path:
+                            # Fallback: try GetImageRequest
+                            local_path = await loop.run_in_executor(
+                                None, self._download_image_sync, image_key
+                            )
                         if local_path:
                             media_files.append(local_path)
                             logger.info(f"Downloaded image {image_key} → {local_path}")
