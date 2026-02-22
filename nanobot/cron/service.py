@@ -156,7 +156,7 @@ class CronService:
         )
         try:
             with os.fdopen(tmp_fd, "w") as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, indent=2, ensure_ascii=False)
             os.replace(tmp_path, str(self.store_path))
         except BaseException:
             try:

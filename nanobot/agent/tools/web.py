@@ -170,7 +170,7 @@ class WebFetchTool(Tool):
             
             # JSON
             if "application/json" in ctype:
-                text, extractor = json.dumps(r.json(), indent=2), "json"
+                text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 doc = Document(r.text)

@@ -297,9 +297,9 @@ class SessionManager:
                     "channel": channel,
                     "chat_id": chat_id,
                 }
-                f.write(json.dumps(metadata_line) + "\n")
+                f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
                 for msg in session.messages:
-                    f.write(json.dumps(msg) + "\n")
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
             os.replace(tmp_path, str(path))  # atomic on POSIX
         except BaseException:
             try:
