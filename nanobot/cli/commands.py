@@ -407,7 +407,9 @@ def gateway(
                     if isinstance(content, list):
                         content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
                     preview = content[:300].replace("\n", " ")
-                    context_lines.append(f"[{role}] {preview}")
+                    ts = m.get("timestamp", "")[:16]  # YYYY-MM-DD HH:MM
+                    ts_prefix = f" [{ts}]" if ts else ""
+                    context_lines.append(f"[{role}]{ts_prefix} {preview}")
                 if context_lines:
                     context_summary = "\n".join(context_lines[-100:])  # Last 100 non-tool messages
                     message = (
