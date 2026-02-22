@@ -298,7 +298,8 @@ class SubagentManager:
 
             # Determine thread target:
             # - If reply_to is set (user's message_id), reply under user's thread
-            # - Otherwise, create a new thread root
+            # - If reply_to is None (not set), create a new thread root
+            # - If reply_to is "" (explicitly no thread), don't use threading
             if reply_to:
                 thread_root_id = reply_to
                 # Send a start notification in the user's thread
@@ -310,8 +311,12 @@ class SubagentManager:
                     reply_to=thread_root_id,
                 )
                 await self.bus.publish_outbound(start_msg)
-            else:
+            elif reply_to is None:
+                # Create a new thread root only when reply_to is not explicitly set
                 thread_root_id = await self._send_thread_root(task_id, label, origin)
+            else:
+                # reply_to is "" (explicitly no thread mode)
+                thread_root_id = None
 
             # Message tool: wraps send to reply in the thread
             async def _threaded_send(msg: "OutboundMessage") -> None:
