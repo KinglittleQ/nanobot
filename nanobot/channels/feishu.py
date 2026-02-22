@@ -49,7 +49,34 @@ def _extract_post_text(content_json: dict) -> str:
     Supports two formats:
     1. Direct format: {"title": "...", "content": [...]}
     2. Localized format: {"zh_cn": {"title": "...", "content": [...]}}
+    
+    Content blocks can be:
+    - Nested lists: [[{tag: "text", text: "..."}, ...], ...]
+    - Direct dicts: [{tag: "code_block", ...}, ...]  (e.g. code blocks)
     """
+    def _extract_element(element: dict) -> str | None:
+        """Extract text from a single element dict."""
+        if not isinstance(element, dict):
+            return None
+        tag = element.get("tag")
+        if tag == "text":
+            return element.get("text", "")
+        elif tag == "a":
+            return element.get("text", "")
+        elif tag == "at":
+            return f"@{element.get('user_name', 'user')}"
+        elif tag == "code_block":
+            lang = element.get("language", "")
+            code = element.get("text", "")
+            return f"\n```{lang}\n{code}\n```\n"
+        elif tag == "emotion":
+            return element.get("emoji_type", "")
+        elif tag == "img":
+            return "[image]"
+        elif tag == "media":
+            return "[media]"
+        return None
+
     def extract_from_lang(lang_content: dict) -> str | None:
         if not isinstance(lang_content, dict):
             return None
@@ -61,23 +88,17 @@ def _extract_post_text(content_json: dict) -> str:
         if title:
             text_parts.append(title)
         for block in content_blocks:
-            if not isinstance(block, list):
-                continue
-            for element in block:
-                if isinstance(element, dict):
-                    tag = element.get("tag")
-                    if tag == "text":
-                        text_parts.append(element.get("text", ""))
-                    elif tag == "a":
-                        text_parts.append(element.get("text", ""))
-                    elif tag == "at":
-                        text_parts.append(f"@{element.get('user_name', 'user')}")
-                    elif tag == "code_block":
-                        lang = element.get("language", "")
-                        code = element.get("text", "")
-                        text_parts.append(f"\n```{lang}\n{code}\n```\n")
-                    elif tag == "emotion":
-                        text_parts.append(element.get("emoji_type", ""))
+            if isinstance(block, list):
+                # Nested list of elements: [[{tag: "text"}, ...], ...]
+                for element in block:
+                    text = _extract_element(element)
+                    if text:
+                        text_parts.append(text)
+            elif isinstance(block, dict):
+                # Direct element dict: {tag: "code_block", ...}
+                text = _extract_element(block)
+                if text:
+                    text_parts.append(text)
         return " ".join(text_parts).strip() if text_parts else None
     
     # Try direct format first
@@ -703,7 +724,7 @@ class FeishuChannel(BaseChannel):
             await self._add_reaction(message_id, "THUMBSUP")
             
             # Parse message content
-            logger.debug(f"Feishu message type={msg_type}, raw content={message.content[:500] if message.content else ''}")
+            logger.info(f"Feishu message type={msg_type}, raw content={message.content[:500] if message.content else ''}")
             if msg_type == "text":
                 try:
                     content = json.loads(message.content).get("text", "")
@@ -712,7 +733,7 @@ class FeishuChannel(BaseChannel):
             elif msg_type == "post":
                 try:
                     content_json = json.loads(message.content)
-                    logger.debug(f"Post content JSON: {json.dumps(content_json, ensure_ascii=False)[:500]}")
+                    logger.info(f"Post content JSON: {json.dumps(content_json, ensure_ascii=False)[:1000]}")
                     content = _extract_post_text(content_json)
                 except (json.JSONDecodeError, TypeError):
                     content = message.content or ""
