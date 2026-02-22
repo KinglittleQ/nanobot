@@ -27,6 +27,34 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
 
 
+# Default context window sizes for known models (in tokens).
+# Used to trigger memory consolidation when prompt_tokens exceeds 80% of the window.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # Claude models
+    "claude-opus": 200_000,
+    "claude-sonnet": 200_000,
+    "claude-haiku": 200_000,
+    # OpenAI models
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 8_192,
+    "gpt-3.5": 16_385,
+    "o1": 200_000,
+    "o3": 200_000,
+    # DeepSeek models
+    "deepseek": 64_000,
+    # Zhipu models
+    "glm-5": 128_000,
+    "glm-4": 128_000,
+    # Gemini models
+    "gemini-2": 1_000_000,
+    "gemini-1.5": 1_000_000,
+    # Qwen models
+    "qwen": 128_000,
+}
+DEFAULT_CONTEXT_WINDOW = 128_000  # Fallback for unknown models
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -97,6 +125,8 @@ class AgentLoop:
         self._start_time: float | None = None  # Set when run() starts
         # Per-session token usage: {session_key: {prompt_tokens, completion_tokens, total_tokens, llm_calls}}
         self._usage_stats: dict[str, dict[str, int]] = {}
+        # Track sessions that need context-window-based consolidation
+        self._needs_context_consolidation: set[str] = set()
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
@@ -186,12 +216,14 @@ class AgentLoop:
                 "completion_tokens": 0,
                 "total_tokens": 0,
                 "llm_calls": 0,
+                "last_prompt_tokens": 0,
             }
         stats = self._usage_stats[session_key]
         stats["prompt_tokens"] += usage.get("prompt_tokens", 0)
         stats["completion_tokens"] += usage.get("completion_tokens", 0)
         stats["total_tokens"] += usage.get("total_tokens", 0)
         stats["llm_calls"] += 1
+        stats["last_prompt_tokens"] = usage.get("prompt_tokens", 0)
 
     def _get_global_usage(self) -> dict[str, int]:
         """Get aggregated token usage across all sessions."""
@@ -200,6 +232,18 @@ class AgentLoop:
             for k in totals:
                 totals[k] += stats.get(k, 0)
         return totals
+
+    def _get_context_window(self) -> int:
+        """Get the context window size for the current model.
+
+        Matches model name against MODEL_CONTEXT_WINDOWS keys (substring match).
+        Returns DEFAULT_CONTEXT_WINDOW if no match found.
+        """
+        model_lower = (self.model or "").lower()
+        for key, window in MODEL_CONTEXT_WINDOWS.items():
+            if key in model_lower:
+                return window
+        return DEFAULT_CONTEXT_WINDOW
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -312,6 +356,19 @@ class AgentLoop:
             # Track token usage
             if session and response.usage:
                 self._track_usage(session.key, response.usage)
+
+                # Check if prompt tokens exceed 80% of model's context window.
+                # If so, flag the session for consolidation after this loop finishes.
+                prompt_tokens = response.usage.get("prompt_tokens", 0)
+                context_window = self._get_context_window()
+                threshold = int(context_window * 0.8)
+                if prompt_tokens > threshold:
+                    logger.warning(
+                        f"Context usage {prompt_tokens:,}/{context_window:,} tokens "
+                        f"({prompt_tokens * 100 // context_window}%) exceeds 80% threshold. "
+                        f"Flagging session {session.key} for consolidation."
+                    )
+                    self._needs_context_consolidation.add(session.key)
 
             # Handle LLM errors — don't save error responses to session history
             if response.finish_reason == "error":
@@ -572,6 +629,13 @@ class AgentLoop:
             session=session,
         )
 
+        # Check if context-window-based consolidation was flagged during the loop
+        if session and session.key in self._needs_context_consolidation:
+            self._needs_context_consolidation.discard(session.key)
+            logger.info(f"Triggering context-window consolidation for session {session.key}")
+            # Run consolidation synchronously (we hold the session lock)
+            await self._consolidate_memory(session)
+
         if final_content is None:
             if hit_max:
                 final_content = "⚠️ 达到最大迭代次数，任务可能未完成。"
@@ -697,6 +761,8 @@ class AgentLoop:
 
         # --- Model ---
         lines.append(f"🤖 Model: `{self.model}`")
+        context_window = self._get_context_window()
+        lines.append(f"📏 Context window: {context_window:,} tokens")
         tools_status = "开启" if self._show_tool_calls(session) else "关闭"
         lines.append(f"🔧 Tool call output: {tools_status}")
 
@@ -716,6 +782,12 @@ class AgentLoop:
             lines.append(f"  Completion tokens: {session_usage['completion_tokens']:,}")
             lines.append(f"  Total tokens: {session_usage['total_tokens']:,}")
             lines.append(f"  LLM calls: {session_usage['llm_calls']}")
+            # Show last prompt tokens vs context window
+            last_prompt = session_usage.get("last_prompt_tokens", 0)
+            if last_prompt:
+                pct = last_prompt * 100 // context_window
+                bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+                lines.append(f"  Context usage: {last_prompt:,}/{context_window:,} ({pct}%) [{bar}]")
         else:
             lines.append(f"\n📊 **Token Usage (this session)**: no data yet")
 
