@@ -708,7 +708,8 @@ class AgentLoop:
         # Determine reply_to: thread root if in thread, otherwise user's message_id
         _reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id") or ""
         # If thread mode is disabled, don't reply in thread
-        if session and not self._use_thread(session):
+        _no_thread = session and not self._use_thread(session)
+        if _no_thread:
             _reply_to = ""
         self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id, reply_to=_reply_to)
         initial_messages = self.context.build_messages(
@@ -721,10 +722,10 @@ class AgentLoop:
 
         async def _bus_progress(content: str) -> None:
             # reply_to: use thread root if in a thread, otherwise reply to user's message
-            _reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id")
+            _progress_reply_to = "" if _no_thread else ((msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id"))
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content,
-                reply_to=_reply_to,
+                reply_to=_progress_reply_to,
                 metadata=msg.metadata or {},
             ))
 
@@ -790,7 +791,7 @@ class AgentLoop:
         self._save_remaining(session, full_messages, persisted_count)
 
         # Reply to thread root if in a thread, otherwise reply to user's message
-        _final_reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id")
+        _final_reply_to = "" if _no_thread else ((msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id"))
         
         return OutboundMessage(
             channel=msg.channel,
