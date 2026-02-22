@@ -29,6 +29,9 @@ class ContextBuilder:
         """
         Build the system prompt from bootstrap files, memory, and skills.
         
+        Dynamic content (Current Time, Current Session) is appended at the
+        END so the static prefix can benefit from Anthropic prompt caching.
+        
         Args:
             skill_names: Optional list of skills to include.
         
@@ -68,14 +71,22 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
         
-        return "\n\n---\n\n".join(parts)
-    
-    def _get_identity(self) -> str:
-        """Get the core identity section."""
+        # Dynamic content at the END for prompt cache friendliness
         from datetime import datetime
         import time as _time
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
+        parts.append(f"## Current Time\n{now} ({tz})")
+        
+        return "\n\n---\n\n".join(parts)
+    
+    def _get_identity(self) -> str:
+        """Get the core identity section.
+        
+        NOTE: Dynamic content (Current Time) is placed at the END of the
+        system prompt (appended by build_system_prompt) so that the static
+        prefix can benefit from Anthropic prompt caching.
+        """
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -88,9 +99,6 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 - Search the web and fetch web pages
 - Send messages to users on chat channels
 - Spawn subagents for complex background tasks
-
-## Current Time
-{now} ({tz})
 
 ## Runtime
 {runtime}

@@ -790,7 +790,7 @@ class FeishuChannel(BaseChannel):
                     return
             
             # Add reaction to indicate "seen"
-            await self._add_reaction(message_id, "THUMBSUP")
+            await self._add_reaction(message_id, "Get")
             
             # Parse message content
             logger.info(f"Feishu message type={msg_type}, raw content={message.content[:500] if message.content else ''}")
