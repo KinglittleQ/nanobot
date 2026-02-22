@@ -322,7 +322,10 @@ class FeishuChannel(BaseChannel):
         self._running = False
         if self._ws_client:
             try:
-                self._ws_client.stop()
+                # lark_oapi ws.Client has no stop() method; close the underlying connection
+                conn = getattr(self._ws_client, "_conn", None)
+                if conn is not None:
+                    await conn.close()
             except Exception as e:
                 logger.warning(f"Error stopping WebSocket client: {e}")
         logger.info("Feishu bot stopped")

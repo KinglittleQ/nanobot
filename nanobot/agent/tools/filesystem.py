@@ -11,10 +11,17 @@ from nanobot.agent.tool_context import get_tool_sender_id
 
 
 def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
-    """Resolve path and optionally enforce directory restriction."""
+    """Resolve path and optionally enforce directory restriction.
+
+    Uses Path.relative_to() instead of string startswith() to prevent
+    path traversal bypasses (e.g. /home/ubuntu_evil matching /home/ubuntu).
+    """
     resolved = Path(path).expanduser().resolve()
-    if allowed_dir and not str(resolved).startswith(str(allowed_dir.resolve())):
-        raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
+    if allowed_dir:
+        try:
+            resolved.relative_to(allowed_dir.resolve())
+        except ValueError:
+            raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
     return resolved
 
 

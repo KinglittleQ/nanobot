@@ -200,11 +200,20 @@ class AgentLoop:
         """Connect to configured MCP servers (one-time, lazy)."""
         if self._mcp_connected or not self._mcp_servers:
             return
-        self._mcp_connected = True
         from nanobot.agent.tools.mcp import connect_mcp_servers
-        self._mcp_stack = AsyncExitStack()
-        await self._mcp_stack.__aenter__()
-        await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
+        try:
+            self._mcp_stack = AsyncExitStack()
+            await self._mcp_stack.__aenter__()
+            await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
+            self._mcp_connected = True
+        except Exception as e:
+            logger.error("Failed to connect MCP servers (will retry next message): {}", e)
+            if self._mcp_stack:
+                try:
+                    await self._mcp_stack.aclose()
+                except Exception:
+                    pass
+                self._mcp_stack = None
 
     def _set_tool_context(self, channel: str, chat_id: str, sender_id: str = "", reply_to: str = "") -> None:
         """Update context for all tools that need routing info.
@@ -461,7 +470,7 @@ class AgentLoop:
             new_msgs = non_system[persisted_count:]
             if new_msgs:
                 session.extend_messages(new_msgs)
-                self.sessions.save(session)
+                self.sessions.save_incremental(session)
                 persisted_count = len(non_system)
 
         while iteration < self.max_iterations:

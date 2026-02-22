@@ -30,6 +30,7 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # Number of messages already consolidated to files
+    _disk_message_count: int = field(default=0, repr=False)  # Messages already on disk (for incremental save)
     
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -144,6 +145,7 @@ class Session:
         """Clear all messages and reset session to initial state."""
         self.messages = []
         self.last_consolidated = 0
+        self._disk_message_count = 0
         self.updated_at = datetime.now()
 
 
@@ -283,7 +285,12 @@ class SessionManager:
                     if not line:
                         continue
 
-                    data = json.loads(line)
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        # Skip malformed lines (e.g. from interrupted incremental append)
+                        logger.warning(f"Skipping malformed line in session {key}: {line[:80]}...")
+                        continue
 
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
@@ -295,22 +302,27 @@ class SessionManager:
             # Sanitize to fix any broken tool_use/tool_result pairing
             messages = self._sanitize_messages(messages)
 
-            return Session(
+            session = Session(
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
                 metadata=metadata,
                 last_consolidated=last_consolidated
             )
+            session._disk_message_count = len(messages)
+            return session
         except Exception as e:
             logger.warning(f"Failed to load session {key}: {e}")
             return None
     
     def save(self, session: Session) -> None:
-        """Save a session to disk atomically.
+        """Save a session to disk atomically (full rewrite).
 
         Writes to a temporary file first, then renames (atomic on POSIX)
         to avoid data loss if the process crashes mid-write.
+
+        Use ``save_incremental()`` when only new messages were appended
+        (no metadata change) to avoid rewriting the entire file.
         """
         import os
         import tempfile
@@ -347,7 +359,41 @@ class SessionManager:
                 pass
             raise
 
+        session._disk_message_count = len(session.messages)
         self._cache[session.key] = session
+
+    def save_incremental(self, session: Session) -> None:
+        """Append only new messages to the session file on disk.
+
+        This is much faster than ``save()`` for large sessions during
+        tool-call loops where many messages are added in quick succession.
+        Falls back to full ``save()`` if the file doesn't exist yet or if
+        messages were removed (truncation).
+
+        Safety: appends are NOT atomic — a crash mid-append could leave a
+        partial JSON line.  The ``_load()`` method already handles this
+        gracefully by skipping malformed lines.
+        """
+        path = self._get_session_path(session.key)
+
+        # Fall back to full save if file doesn't exist or messages were truncated
+        if not path.exists() or len(session.messages) < session._disk_message_count:
+            self.save(session)
+            return
+
+        new_messages = session.messages[session._disk_message_count:]
+        if not new_messages:
+            return  # Nothing to append
+
+        try:
+            with open(path, "a") as f:
+                for msg in new_messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            session._disk_message_count = len(session.messages)
+            self._cache[session.key] = session
+        except Exception as e:
+            logger.warning(f"Incremental save failed for {session.key}, falling back to full save: {e}")
+            self.save(session)
     
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
