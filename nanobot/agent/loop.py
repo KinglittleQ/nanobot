@@ -150,6 +150,8 @@ class AgentLoop:
         self._start_time: float | None = None  # Set when run() starts
         # Per-session token usage: {session_key: {prompt_tokens, completion_tokens, total_tokens, llm_calls}}
         self._usage_stats: dict[str, dict[str, int]] = {}
+        self._usage_file = self.workspace / "memory" / "usage_stats.json"
+        self._load_usage_stats()
         # Track sessions that need context-window-based consolidation
         self._needs_context_consolidation: set[str] = set()
         self._register_default_tools()
@@ -240,6 +242,26 @@ class AgentLoop:
         session.metadata["use_thread"] = use
         self.sessions.save(session)
 
+    def _load_usage_stats(self) -> None:
+        """Load usage stats from disk."""
+        try:
+            if self._usage_file.exists():
+                import json
+                self._usage_stats = json.loads(self._usage_file.read_text(encoding="utf-8"))
+                logger.info(f"Loaded usage stats: {sum(s.get('llm_calls', 0) for s in self._usage_stats.values())} total LLM calls across {len(self._usage_stats)} sessions")
+        except Exception as e:
+            logger.warning(f"Failed to load usage stats: {e}")
+            self._usage_stats = {}
+
+    def _save_usage_stats(self) -> None:
+        """Persist usage stats to disk."""
+        try:
+            import json
+            self._usage_file.parent.mkdir(parents=True, exist_ok=True)
+            self._usage_file.write_text(json.dumps(self._usage_stats, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to save usage stats: {e}")
+
     def _track_usage(self, session_key: str, usage: dict[str, int]) -> None:
         """Accumulate token usage for a session."""
         if not usage:
@@ -271,6 +293,7 @@ class AgentLoop:
         stats["cache_creation_tokens"] += cache_created
         stats["cache_read_tokens"] += cache_read
         stats["uncached_input_tokens"] += uncached
+        self._save_usage_stats()
 
     def _get_global_usage(self) -> dict[str, int]:
         """Get aggregated token usage across all sessions."""
@@ -680,7 +703,7 @@ class AgentLoop:
             tools_status = "开启 🔧" if self._show_tool_calls(session) else "关闭"
             thread_status = "开启（话题回复）" if self._use_thread(session) else "关闭（直接发送）"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/tools — Toggle tool call output visibility\n/thread — Toggle thread/topic reply mode\n/help — Show available commands\n\nTool call output: {tools_status}\n话题模式: {thread_status}")
+                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/usage reset — Reset token usage stats\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/tools — Toggle tool call output visibility\n/thread — Toggle thread/topic reply mode\n/help — Show available commands\n\nTool call output: {tools_status}\n话题模式: {thread_status}")
         if cmd == "/tools":
             current = self._show_tool_calls(session)
             self._set_show_tool_calls(session, not current)
@@ -696,6 +719,11 @@ class AgentLoop:
         if cmd == "/status":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=self._build_status(key, session))
+        if cmd == "/usage reset":
+            self._usage_stats = {}
+            self._save_usage_stats()
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="📊 Token usage stats reset.")
         if cmd.startswith("/tasks"):
             return await self._handle_tasks_command(cmd, msg)
         
@@ -954,7 +982,7 @@ class AgentLoop:
         # --- Global token usage ---
         global_usage = self._get_global_usage()
         if global_usage["llm_calls"] > 0:
-            lines.append(f"\n🌐 **Token Usage (all sessions since restart)**")
+            lines.append(f"\n🌐 **Token Usage (cumulative)**")
             g_uncached = global_usage.get('uncached_input_tokens', 0)
             g_cache_read = global_usage.get('cache_read_tokens', 0)
             g_cache_created = global_usage.get('cache_creation_tokens', 0)
