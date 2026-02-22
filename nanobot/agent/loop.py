@@ -91,7 +91,7 @@ class AgentLoop:
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
-        self.verbose_tool_output = False  # Default: brief mode (global fallback)
+        self.verbose_tool_output = False  # Default: don't show tool call messages to user
         self._session_locks: dict[str, asyncio.Lock] = {}  # Per-session locks
         self._concurrency_sem = asyncio.Semaphore(max_concurrent_sessions)
         self._start_time: float | None = None  # Set when run() starts
@@ -167,13 +167,13 @@ class AgentLoop:
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
-    def _is_verbose(self, session: "Session") -> bool:
-        """Check if verbose tool output is enabled for this session."""
-        return session.metadata.get("verbose_tool_output", self.verbose_tool_output)
+    def _show_tool_calls(self, session: "Session") -> bool:
+        """Check if tool call output is enabled for this session."""
+        return session.metadata.get("show_tool_calls", self.verbose_tool_output)
 
-    def _set_verbose(self, session: "Session", verbose: bool) -> None:
-        """Set verbose tool output for this session."""
-        session.metadata["verbose_tool_output"] = verbose
+    def _set_show_tool_calls(self, session: "Session", show: bool) -> None:
+        """Set tool call output visibility for this session."""
+        session.metadata["show_tool_calls"] = show
         self.sessions.save(session)
 
     def _track_usage(self, session_key: str, usage: dict[str, int]) -> None:
@@ -325,6 +325,9 @@ class AgentLoop:
                     if clean:
                         await on_progress(clean)
 
+                # Check if tool call output should be shown to user
+                _show_tools = self._show_tool_calls(session) if session else self.verbose_tool_output
+
                 tool_call_dicts = [
                     {
                         "id": tc.id,
@@ -346,10 +349,10 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    if on_progress:
+                    if on_progress and _show_tools:
                         detail = self._format_tool_detail(
                             tool_call.name, tool_call.arguments, result,
-                            verbose=self._is_verbose(session) if session else self.verbose_tool_output,
+                            verbose=True,
                         )
                         await on_progress(detail)
                     messages = self.context.add_tool_result(
@@ -519,17 +522,15 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started. Memory consolidation in progress.")
         if cmd == "/help":
-            mode = "verbose 📝" if self._is_verbose(session) else "brief 📎"
+            tools_status = "开启 🔧" if self._show_tool_calls(session) else "关闭"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/verbose — Verbose tool output\n/brief — Brief tool output (one line)\n/help — Show available commands\n\nCurrent tool output mode: {mode}")
-        if cmd == "/verbose":
-            self._set_verbose(session, True)
+                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/tools — Toggle tool call output visibility\n/help — Show available commands\n\nTool call output: {tools_status}")
+        if cmd == "/tools":
+            current = self._show_tool_calls(session)
+            self._set_show_tool_calls(session, not current)
+            new_state = "开启 🔧" if not current else "关闭"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="📝 Tool output mode: **verbose** (full details)")
-        if cmd == "/brief":
-            self._set_verbose(session, False)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="📎 Tool output mode: **brief** (one line per tool call)")
+                                  content=f"Tool call output: **{new_state}**")
         if cmd == "/status":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=self._build_status(key, session))
@@ -696,8 +697,8 @@ class AgentLoop:
 
         # --- Model ---
         lines.append(f"🤖 Model: `{self.model}`")
-        mode = "verbose" if self._is_verbose(session) else "brief"
-        lines.append(f"🔧 Tool output: {mode}")
+        tools_status = "开启" if self._show_tool_calls(session) else "关闭"
+        lines.append(f"🔧 Tool call output: {tools_status}")
 
         # --- Session info ---
         msg_count = len(session.messages)
