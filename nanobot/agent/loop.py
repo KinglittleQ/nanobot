@@ -307,7 +307,7 @@ class AgentLoop:
         stats["cache_creation_tokens"] += cache_created
         stats["cache_read_tokens"] += cache_read
         stats["uncached_input_tokens"] += uncached
-        self._save_usage_stats()
+        # Note: caller is responsible for calling _save_usage_stats() after the loop
 
     def _get_global_usage(self) -> dict[str, int]:
         """Get aggregated token usage across all sessions."""
@@ -566,6 +566,9 @@ class AgentLoop:
         # Extract non-system messages for persistence
         new_messages = [m for m in messages if m.get("role") != "system"]
         hit_max = (iteration >= self.max_iterations and final_content is None)
+
+        # Persist accumulated usage stats once after the loop (not per-call)
+        self._save_usage_stats()
 
         return final_content, tools_used, new_messages, hit_max, persisted_count, generated_media
 
@@ -1104,7 +1107,7 @@ class AgentLoop:
         unsaved = full_messages[persisted_count:]
         if unsaved:
             session.extend_messages(unsaved)
-            self.sessions.save(session)
+            self.sessions.save_incremental(session)
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
