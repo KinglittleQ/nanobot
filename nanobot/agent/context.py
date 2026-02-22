@@ -29,8 +29,10 @@ class ContextBuilder:
         """
         Build the system prompt from bootstrap files, memory, and skills.
         
-        Dynamic content (Current Time, Current Session) is appended at the
-        END so the static prefix can benefit from Anthropic prompt caching.
+        The system prompt is kept STATIC (no timestamps or per-request dynamic
+        content) so that Anthropic prompt caching can match the prefix across
+        calls.  Dynamic content like current time is injected into the user
+        message instead (see build_messages).
         
         Args:
             skill_names: Optional list of skills to include.
@@ -70,13 +72,6 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
-        
-        # Dynamic content at the END for prompt cache friendliness
-        from datetime import datetime
-        import time as _time
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
-        parts.append(f"## Current Time\n{now} ({tz})")
         
         return "\n\n---\n\n".join(parts)
     
@@ -141,6 +136,11 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         """
         Build the complete message list for an LLM call.
 
+        The system prompt is kept static for prompt cache efficiency.
+        Dynamic per-request context (current time, session info) is
+        prepended to the user message so that [system] + [history]
+        forms a stable, cacheable prefix.
+
         Args:
             history: Previous conversation messages.
             current_message: The new user message.
@@ -154,17 +154,23 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         """
         messages = []
 
-        # System prompt
+        # System prompt (static — no timestamps for cache friendliness)
         system_prompt = self.build_system_prompt(skill_names)
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
 
-        # History
+        # History (unchanged — forms cacheable prefix with system prompt)
         messages.extend(history)
 
-        # Current message (with optional image attachments)
-        user_content = self._build_user_content(current_message, media)
+        # Current message with dynamic context (time) injected
+        from datetime import datetime
+        import time as _time
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        tz = _time.strftime("%Z") or "UTC"
+        timestamped_message = f"[{now} ({tz})]\n{current_message}"
+
+        user_content = self._build_user_content(timestamped_message, media)
         messages.append({"role": "user", "content": user_content})
 
         return messages
