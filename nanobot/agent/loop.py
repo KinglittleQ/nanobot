@@ -632,9 +632,23 @@ class AgentLoop:
         # Check if context-window-based consolidation was flagged during the loop
         if session and session.key in self._needs_context_consolidation:
             self._needs_context_consolidation.discard(session.key)
+            prompt_tokens = self._usage_stats.get(key, {}).get("last_prompt_tokens", 0)
+            context_window = self._get_context_window()
+            pct = prompt_tokens * 100 // context_window if context_window else 0
             logger.info(f"Triggering context-window consolidation for session {session.key}")
             # Run consolidation synchronously (we hold the session lock)
             await self._consolidate_memory(session)
+            # Notify user about the consolidation
+            consolidation_msg = (
+                f"🧹 **Memory Consolidation**\n"
+                f"上下文使用率 {prompt_tokens:,}/{context_window:,} tokens ({pct}%) 超过 80%，"
+                f"已自动整理历史消息到 HISTORY.md，保留最近的对话。"
+            )
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=consolidation_msg,
+                reply_to=_reply_to,
+            ))
 
         if final_content is None:
             if hit_max:
