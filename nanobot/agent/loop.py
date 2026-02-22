@@ -260,7 +260,6 @@ class AgentLoop:
         """Load usage stats from disk."""
         try:
             if self._usage_file.exists():
-                import json
                 self._usage_stats = json.loads(self._usage_file.read_text(encoding="utf-8"))
                 logger.info(f"Loaded usage stats: {sum(s.get('llm_calls', 0) for s in self._usage_stats.values())} total LLM calls across {len(self._usage_stats)} sessions")
         except Exception as e:
@@ -270,7 +269,6 @@ class AgentLoop:
     def _save_usage_stats(self) -> None:
         """Persist usage stats to disk."""
         try:
-            import json
             self._usage_file.parent.mkdir(parents=True, exist_ok=True)
             self._usage_file.write_text(json.dumps(self._usage_stats, indent=2), encoding="utf-8")
         except Exception as e:
@@ -869,8 +867,7 @@ class AgentLoop:
                 with open(path) as f:
                     first_line = f.readline().strip()
                     if first_line:
-                        import json as _json
-                        meta = _json.loads(first_line)
+                        meta = json.loads(first_line)
                         if meta.get("_type") == "metadata":
                             channel = meta.get("channel")
                             chat_id = meta.get("chat_id")
