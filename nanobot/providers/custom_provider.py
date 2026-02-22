@@ -59,19 +59,21 @@ class CustomProvider(LLMProvider):
     def _inject_cache_control(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Inject Anthropic cache_control breakpoints for prompt caching.
 
-        Adds ``cache_control: {type: "ephemeral"}`` to:
+        Adds ``cache_control: {type: "ephemeral"}`` to up to 3 positions:
         1. The system message — caches the static system prompt.
         2. The message just before the last user message — caches the
-           conversation history prefix so it survives tool-call loops.
+           conversation history prefix so it survives across user turns.
+        3. The second-to-last message — during tool-call loops, this caches
+           everything up to the previous round so only the latest tool result
+           is uncached.
 
         During a tool-call loop the message list grows:
-          Round 1: [sys] [history...] [user_new]
-          Round 2: [sys] [history...] [user_new] [asst+tools] [tool_result]
-          Round 3: [sys] [history...] [user_new] [asst+tools] [tool_result] [asst+tools] [tool_result]
+          Round 1: [sys*] [history...] [prev*] [user_new] → BP3 on user_new
+          Round 2: [sys*] [history...] [prev*] [user_new] [asst+tools] [tool_result*] → BP3 on asst+tools
+          Round 3: [sys*] [history...] [prev*] [user_new] [asst+tools] [tool_result] [asst+tools] [tool_result*]
 
-        By anchoring BP2 to the message before the *last user message*
-        (i.e. the end of history), the breakpoint stays at the same
-        position across tool-call rounds, maximising cache hits.
+        BP3 moves with each round, maximizing cache hits during tool loops.
+        Anthropic allows up to 4 breakpoints; we use 3.
         """
         if not messages:
             return messages
@@ -92,18 +94,31 @@ class CustomProvider(LLMProvider):
             return msg
 
         # Breakpoint 1: system message
+        bp1_idx = None
         if messages[0].get("role") == "system":
             messages[0] = _mark(messages[0])
+            bp1_idx = 0
 
         # Breakpoint 2: the message just before the last user message.
         # Find the last user message, then mark the one before it.
+        bp2_idx = None
         last_user_idx = None
         for i in range(len(messages) - 1, 0, -1):
             if messages[i].get("role") == "user":
                 last_user_idx = i
                 break
         if last_user_idx and last_user_idx >= 2:
-            messages[last_user_idx - 1] = _mark(messages[last_user_idx - 1])
+            bp2_idx = last_user_idx - 1
+            messages[bp2_idx] = _mark(messages[bp2_idx])
+
+        # Breakpoint 3: second-to-last message (for tool-call loop caching).
+        # Only add if it's a different position from BP1 and BP2, and there
+        # are at least 2 messages after the last user message (i.e. we're
+        # in a tool-call loop).
+        if len(messages) >= 3:
+            bp3_idx = len(messages) - 2
+            if bp3_idx != bp1_idx and bp3_idx != bp2_idx:
+                messages[bp3_idx] = _mark(messages[bp3_idx])
 
         return messages
 
