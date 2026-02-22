@@ -389,8 +389,35 @@ def gateway(
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
+        message = job.payload.message
+
+        # If this job delivers to a user channel, inject recent main session
+        # context so the cron task can see what the user has been talking about.
+        if job.payload.deliver and job.payload.channel and job.payload.to:
+            main_session_key = f"{job.payload.channel}:{job.payload.to}"
+            main_session = session_manager.get_or_create(main_session_key)
+            recent = main_session.get_history(max_messages=20)
+            if recent:
+                context_lines = []
+                for m in recent:
+                    role = m.get("role", "?")
+                    content = m.get("content", "")
+                    if role == "tool" or not content:
+                        continue
+                    if isinstance(content, list):
+                        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+                    preview = content[:200].replace("\n", " ")
+                    context_lines.append(f"[{role}] {preview}")
+                if context_lines:
+                    context_summary = "\n".join(context_lines[-15:])  # Last 15 non-tool messages
+                    message = (
+                        f"[主对话上下文（只读参考，不要回复这些内容）]\n"
+                        f"{context_summary}\n\n"
+                        f"[当前任务]\n{job.payload.message}"
+                    )
+
         response = await agent.process_direct(
-            job.payload.message,
+            message,
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
