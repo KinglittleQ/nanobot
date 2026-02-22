@@ -72,6 +72,12 @@ def _extract_post_text(content_json: dict) -> str:
                         text_parts.append(element.get("text", ""))
                     elif tag == "at":
                         text_parts.append(f"@{element.get('user_name', 'user')}")
+                    elif tag == "code_block":
+                        lang = element.get("language", "")
+                        code = element.get("text", "")
+                        text_parts.append(f"\n```{lang}\n{code}\n```\n")
+                    elif tag == "emotion":
+                        text_parts.append(element.get("emoji_type", ""))
         return " ".join(text_parts).strip() if text_parts else None
     
     # Try direct format first
@@ -697,6 +703,7 @@ class FeishuChannel(BaseChannel):
             await self._add_reaction(message_id, "THUMBSUP")
             
             # Parse message content
+            logger.debug(f"Feishu message type={msg_type}, raw content={message.content[:500] if message.content else ''}")
             if msg_type == "text":
                 try:
                     content = json.loads(message.content).get("text", "")
@@ -705,6 +712,7 @@ class FeishuChannel(BaseChannel):
             elif msg_type == "post":
                 try:
                     content_json = json.loads(message.content)
+                    logger.debug(f"Post content JSON: {json.dumps(content_json, ensure_ascii=False)[:500]}")
                     content = _extract_post_text(content_json)
                 except (json.JSONDecodeError, TypeError):
                     content = message.content or ""
