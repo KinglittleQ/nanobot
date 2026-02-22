@@ -104,11 +104,23 @@ class CustomProvider(LLMProvider):
 
         return messages
 
+    @staticmethod
+    def _sanitize_tool_call_id(tool_call_id: str) -> str:
+        """Sanitize tool call ID to match Claude's required pattern: ^[a-zA-Z0-9_-]+$
+        
+        Claude requires tool call IDs to only contain alphanumeric characters,
+        underscores, and hyphens. This method replaces invalid characters.
+        """
+        import re
+        # Replace any character that doesn't match the allowed pattern with underscore
+        sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', str(tool_call_id))
+        return sanitized
+
     def _parse(self, response: Any) -> LLMResponse:
         choice = response.choices[0]
         msg = choice.message
         tool_calls = [
-            ToolCallRequest(id=tc.id, name=tc.function.name,
+            ToolCallRequest(id=self._sanitize_tool_call_id(tc.id), name=tc.function.name,
                             arguments=json_repair.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments)
             for tc in (msg.tool_calls or [])
         ]
