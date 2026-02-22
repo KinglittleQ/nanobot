@@ -1,5 +1,6 @@
 """Session management for conversation history."""
 
+
 import json
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -47,13 +48,49 @@ class Session:
         Each message gets a timestamp added if not already present.
         This preserves the full conversation context including tool_calls,
         tool_call_id, and tool results for context persistence across restarts.
+        
+        Base64 image data in user messages is replaced with a placeholder
+        to keep session files small and avoid mime-type mismatch errors on reload.
         """
         now = datetime.now().isoformat()
         for msg in messages:
             if "timestamp" not in msg:
                 msg["timestamp"] = now
-            self.messages.append(msg)
+            self.messages.append(self._strip_base64_images(msg))
         self.updated_at = datetime.now()
+
+    @staticmethod
+    def _strip_base64_images(msg: dict[str, Any]) -> dict[str, Any]:
+        """Replace base64 image data in message content with a placeholder.
+        
+        This prevents huge base64 strings from being persisted to disk and
+        avoids mime-type mismatch errors when the session is reloaded.
+        """
+        content = msg.get("content")
+        if not isinstance(content, list):
+            return msg
+        
+        new_content = []
+        had_images = False
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+                if url.startswith("data:"):
+                    # Replace with placeholder text
+                    had_images = True
+                    new_content.append({
+                        "type": "text",
+                        "text": "[image was attached]",
+                    })
+                else:
+                    new_content.append(part)
+            else:
+                new_content.append(part)
+        
+        if had_images:
+            msg = msg.copy()
+            msg["content"] = new_content
+        return msg
     
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Get recent messages in LLM format, preserving tool metadata.
@@ -95,6 +132,8 @@ class Session:
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
                     entry[k] = m[k]
+            # Strip any leftover base64 images from old sessions
+            entry = Session._strip_base64_images(entry)
             out.append(entry)
 
         # Final safety net: run full sanitize to catch any remaining orphans

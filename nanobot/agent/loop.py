@@ -4,6 +4,7 @@ import asyncio
 from contextlib import AsyncExitStack
 import json
 import json_repair
+import os
 from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable
@@ -21,6 +22,7 @@ from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.image_gen import ImageGenTool
 from nanobot.agent.tool_context import set_tool_context
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
@@ -101,7 +103,7 @@ class AgentLoop:
         max_iterations: int = 20,
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        memory_window: int = 50,
+        memory_window: int = 9999,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -190,6 +192,9 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Image generation tool
+        self.tools.register(ImageGenTool())
     
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -408,7 +413,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         session: Session | None = None,
-    ) -> tuple[str | None, list[str], list[dict], bool, int]:
+    ) -> tuple[str | None, list[str], list[dict], bool, int, list[str]]:
         """
         Run the agent iteration loop.
 
@@ -420,26 +425,26 @@ class AgentLoop:
                      progress is not lost on restart.
 
         Returns:
-            Tuple of (final_content, list_of_tools_used, full_messages, hit_max, persisted_count).
+            Tuple of (final_content, list_of_tools_used, full_messages, hit_max, persisted_count, generated_media).
             full_messages includes all messages from the loop (excluding system prompt).
             hit_max is True if the loop exited because max_iterations was reached.
             persisted_count is how many messages in full_messages were already saved to disk.
-
-        Returns:
-            Tuple of (final_content, list_of_tools_used, full_messages, hit_max).
-            full_messages includes all messages from the loop (excluding system prompt).
-            hit_max is True if the loop exited because max_iterations was reached.
+            generated_media is a list of file paths produced by image_gen tool.
         """
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        generated_media: list[str] = []  # file paths from image_gen
 
         # Track how many non-system messages from the LLM conversation (`messages`)
         # have already been persisted to the session.  This counter refers to the
         # position *within the non-system slice of `messages`*, NOT len(session.messages).
         #
-        # `initial_messages` contains: [system_prompt] + history (up to memory_window) + user_msg.
+        # `initial_messages` contains: [system_prompt] + full history + user_msg.
+        # We load ALL session messages (memory_window=9999) so the prefix stays
+        # stable across turns, maximizing prompt cache hits.  Truncation is
+        # handled exclusively by the 80%-context-window consolidation mechanism.
         # The history portion was already on disk.  The new user_msg is NOT yet persisted.
         # So we start counting from the number of history messages only.
         initial_history_count = sum(1 for m in initial_messages if m.get("role") != "system") - 1  # exclude user_msg
@@ -523,6 +528,11 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str})")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    # Collect generated image paths for media attachment
+                    if tool_call.name == "image_gen" and "Image saved to " in result:
+                        path = result.split("Image saved to ", 1)[1].strip()
+                        if os.path.isfile(path):
+                            generated_media.append(path)
                     if on_progress and _show_tools:
                         detail = self._format_tool_detail(
                             tool_call.name, tool_call.arguments, result,
@@ -548,7 +558,7 @@ class AgentLoop:
         new_messages = [m for m in messages if m.get("role") != "system"]
         hit_max = (iteration >= self.max_iterations and final_content is None)
 
-        return final_content, tools_used, new_messages, hit_max, persisted_count
+        return final_content, tools_used, new_messages, hit_max, persisted_count, generated_media
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """Get or create a per-session lock to serialize messages within the same session.
@@ -751,7 +761,7 @@ class AgentLoop:
                 metadata=msg.metadata or {},
             ))
 
-        final_content, tools_used, full_messages, hit_max, persisted_count = await self._run_agent_loop(
+        final_content, tools_used, full_messages, hit_max, persisted_count, generated_media = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
             session=session,
         )
@@ -820,6 +830,7 @@ class AgentLoop:
             chat_id=msg.chat_id,
             content=final_content,
             reply_to=_final_reply_to,
+            media=generated_media if generated_media else [],
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
     
@@ -1114,7 +1125,7 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        final_content, _, full_messages, hit_max, persisted_count = await self._run_agent_loop(
+        final_content, _, full_messages, hit_max, persisted_count, _ = await self._run_agent_loop(
             initial_messages, session=session,
         )
 
@@ -1147,7 +1158,7 @@ class AgentLoop:
             keep_count = 0
             logger.info(f"Memory consolidation (archive_all): {len(session.messages)} total messages archived")
         else:
-            keep_count = self.memory_window // 2
+            keep_count = max(10, len(session.messages) // 3)
             if len(session.messages) <= keep_count:
                 logger.debug(f"Session {session.key}: No consolidation needed (messages={len(session.messages)}, keep={keep_count})")
                 return

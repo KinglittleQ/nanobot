@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from typing import Any
 
 import json_repair
@@ -27,6 +28,9 @@ class CustomProvider(LLMProvider):
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                    model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7) -> LLMResponse:
         effective_model = model or self.default_model
+
+        # Fix mismatched image MIME types (e.g. JPEG declared as PNG)
+        self._fix_image_mime_types(messages)
 
         # Sanitize tool call IDs in message history for Claude compatibility
         messages = self._sanitize_tool_call_ids_in_messages(messages)
@@ -54,6 +58,49 @@ class CustomProvider(LLMProvider):
                     logger.error(f"LLM call failed after {_MAX_RETRIES} attempts: {e}")
 
         return LLMResponse(content=f"Error: {last_error}", finish_reason="error")
+
+    @staticmethod
+    def _fix_image_mime_types(messages: list[dict[str, Any]]) -> None:
+        """Fix mismatched MIME types in base64-encoded images in-place.
+
+        Feishu downloads sometimes save images with .png extension but actual
+        content is JPEG.  The declared MIME in the data: URL must match the
+        actual image bytes, or Anthropic API returns a 400 error.
+        """
+        fixed = 0
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "image_url":
+                    continue
+                url = (part.get("image_url") or {}).get("url", "")
+                if not url.startswith("data:image/") or ";base64," not in url:
+                    continue
+                declared_mime = url.split(";")[0].split(":")[1]
+                b64_data = url.split(",", 1)[1]
+                try:
+                    raw = base64.b64decode(b64_data[:24])
+                except Exception:
+                    continue
+                if raw[:3] == b"\xff\xd8\xff":
+                    actual = "image/jpeg"
+                elif raw[:8] == b"\x89PNG\r\n\x1a\n":
+                    actual = "image/png"
+                elif len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                    actual = "image/webp"
+                elif raw[:6] in (b"GIF87a", b"GIF89a"):
+                    actual = "image/gif"
+                else:
+                    continue
+                if declared_mime != actual:
+                    part["image_url"]["url"] = url.replace(
+                        f"data:{declared_mime};", f"data:{actual};"
+                    )
+                    fixed += 1
+        if fixed:
+            logger.warning(f"Fixed {fixed} mismatched image MIME types before API call")
 
     @staticmethod
     def _inject_cache_control(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
