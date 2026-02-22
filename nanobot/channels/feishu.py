@@ -573,6 +573,18 @@ class FeishuChannel(BaseChannel):
             logger.warning(f"Failed to extract video thumbnail: {e}")
             return None
 
+    def _cleanup_stale_session(self, chat_id: str) -> None:
+        """Remove session file for a chat the bot is no longer in."""
+        try:
+            from pathlib import Path
+            sessions_dir = Path.home() / ".nanobot" / "workspace" / "sessions"
+            session_file = sessions_dir / f"feishu_{chat_id}.jsonl"
+            if session_file.exists():
+                session_file.unlink()
+                logger.info(f"Removed stale session for chat {chat_id} (bot no longer in chat)")
+        except Exception as e:
+            logger.warning(f"Failed to clean up stale session for {chat_id}: {e}")
+
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> str | None:
         """Send a single message (text/image/file/interactive) synchronously.
 
@@ -594,6 +606,9 @@ class FeishuChannel(BaseChannel):
                     f"Failed to send Feishu {msg_type} message: code={response.code}, "
                     f"msg={response.msg}, log_id={response.get_log_id()}"
                 )
+                # Auto-clean stale session if bot is no longer in the chat
+                if response.code == 230002:
+                    self._cleanup_stale_session(receive_id)
                 return None
             message_id = getattr(response.data, "message_id", None)
             logger.debug(f"Feishu {msg_type} message sent to {receive_id}, message_id={message_id}")

@@ -489,6 +489,9 @@ def gateway(
                                     targets.append((parts[0], parts[1]))
 
                     for ch, cid in targets:
+                        # Skip non-user channels (cron, heartbeat, system)
+                        if ch in ("cron", "heartbeat", "system", "cli"):
+                            continue
                         try:
                             await bus.publish_outbound(OutboundMessage(
                                 channel=ch,
