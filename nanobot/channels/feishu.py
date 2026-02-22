@@ -415,6 +415,75 @@ class FeishuChannel(BaseChannel):
         ".xls": "xls", ".xlsx": "xls", ".ppt": "ppt", ".pptx": "ppt",
     }
 
+    def _download_image_sync(self, image_key: str) -> str | None:
+        """Download an image from Feishu by image_key. Returns local file path or None."""
+        import tempfile
+        try:
+            from lark_oapi.api.im.v1 import GetImageRequest
+            request = (
+                GetImageRequest.builder()
+                .image_key(image_key)
+                .build()
+            )
+            response = self._client.im.v1.image.get(request)
+            if not response.success():
+                logger.error(f"Failed to download image {image_key}: code={response.code}, msg={response.msg}")
+                return None
+
+            # Determine extension from file_name or default to .png
+            ext = ".png"
+            if response.file_name:
+                import os
+                _, fext = os.path.splitext(response.file_name)
+                if fext:
+                    ext = fext
+
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=ext, prefix="feishu_img_", dir="/tmp", delete=False
+            )
+            tmp.write(response.file.read())
+            tmp.close()
+            logger.debug(f"Downloaded image {image_key} → {tmp.name}")
+            return tmp.name
+        except Exception as e:
+            logger.error(f"Error downloading image {image_key}: {e}")
+            return None
+
+    def _download_resource_sync(self, message_id: str, file_key: str, resource_type: str = "image") -> str | None:
+        """Download a message resource (image/file) by message_id and file_key."""
+        import tempfile
+        try:
+            from lark_oapi.api.im.v1 import GetMessageResourceRequest
+            request = (
+                GetMessageResourceRequest.builder()
+                .message_id(message_id)
+                .file_key(file_key)
+                .type(resource_type)
+                .build()
+            )
+            response = self._client.im.v1.message_resource.get(request)
+            if not response.success():
+                logger.error(f"Failed to download resource {file_key}: code={response.code}, msg={response.msg}")
+                return None
+
+            ext = ".png" if resource_type == "image" else ".bin"
+            if response.file_name:
+                import os
+                _, fext = os.path.splitext(response.file_name)
+                if fext:
+                    ext = fext
+
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=ext, prefix="feishu_res_", dir="/tmp", delete=False
+            )
+            tmp.write(response.file.read())
+            tmp.close()
+            logger.debug(f"Downloaded resource {file_key} → {tmp.name}")
+            return tmp.name
+        except Exception as e:
+            logger.error(f"Error downloading resource {file_key}: {e}")
+            return None
+
     def _upload_image_sync(self, file_path: str) -> str | None:
         """Upload an image to Feishu and return the image_key."""
         import os
@@ -725,6 +794,8 @@ class FeishuChannel(BaseChannel):
             
             # Parse message content
             logger.info(f"Feishu message type={msg_type}, raw content={message.content[:500] if message.content else ''}")
+            media_files: list[str] = []  # Downloaded media file paths
+
             if msg_type == "text":
                 try:
                     content = json.loads(message.content).get("text", "")
@@ -737,6 +808,24 @@ class FeishuChannel(BaseChannel):
                     content = _extract_post_text(content_json)
                 except (json.JSONDecodeError, TypeError):
                     content = message.content or ""
+            elif msg_type == "image":
+                # Download image and pass to agent as media
+                content = "用户发送了一张图片，请描述或回应。"
+                try:
+                    image_key = json.loads(message.content).get("image_key", "")
+                    if image_key:
+                        loop = asyncio.get_running_loop()
+                        local_path = await loop.run_in_executor(
+                            None, self._download_image_sync, image_key
+                        )
+                        if local_path:
+                            media_files.append(local_path)
+                            logger.info(f"Downloaded image {image_key} → {local_path}")
+                        else:
+                            content = "[图片下载失败]"
+                except (json.JSONDecodeError, Exception) as e:
+                    logger.error(f"Failed to parse/download image: {e}")
+                    content = "[图片处理失败]"
             else:
                 content = MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
             
@@ -766,6 +855,7 @@ class FeishuChannel(BaseChannel):
                 sender_id=sender_id,
                 chat_id=reply_to,
                 content=content,
+                media=media_files if media_files else None,
                 metadata=msg_metadata,
             )
             
