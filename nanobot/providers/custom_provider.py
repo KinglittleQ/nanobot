@@ -58,10 +58,17 @@ class CustomProvider(LLMProvider):
 
         Adds ``cache_control: {type: "ephemeral"}`` to:
         1. The system message — caches the static system prompt.
-        2. The second-to-last message — caches the conversation history prefix.
+        2. The message just before the last user message — caches the
+           conversation history prefix so it survives tool-call loops.
 
-        Converts string content to array-of-blocks format as required by
-        the Anthropic cache_control API.
+        During a tool-call loop the message list grows:
+          Round 1: [sys] [history...] [user_new]
+          Round 2: [sys] [history...] [user_new] [asst+tools] [tool_result]
+          Round 3: [sys] [history...] [user_new] [asst+tools] [tool_result] [asst+tools] [tool_result]
+
+        By anchoring BP2 to the message before the *last user message*
+        (i.e. the end of history), the breakpoint stays at the same
+        position across tool-call rounds, maximising cache hits.
         """
         if not messages:
             return messages
@@ -85,9 +92,15 @@ class CustomProvider(LLMProvider):
         if messages[0].get("role") == "system":
             messages[0] = _mark(messages[0])
 
-        # Breakpoint 2: second-to-last message (history prefix boundary)
-        if len(messages) >= 3:
-            messages[-2] = _mark(messages[-2])
+        # Breakpoint 2: the message just before the last user message.
+        # Find the last user message, then mark the one before it.
+        last_user_idx = None
+        for i in range(len(messages) - 1, 0, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
+        if last_user_idx and last_user_idx >= 2:
+            messages[last_user_idx - 1] = _mark(messages[last_user_idx - 1])
 
         return messages
 
