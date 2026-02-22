@@ -231,6 +231,15 @@ class AgentLoop:
         session.metadata["show_tool_calls"] = show
         self.sessions.save(session)
 
+    def _use_thread(self, session: "Session") -> bool:
+        """Check if thread/topic reply mode is enabled for this session."""
+        return session.metadata.get("use_thread", True)
+
+    def _set_use_thread(self, session: "Session", use: bool) -> None:
+        """Set thread/topic reply mode for this session."""
+        session.metadata["use_thread"] = use
+        self.sessions.save(session)
+
     def _track_usage(self, session_key: str, usage: dict[str, int]) -> None:
         """Accumulate token usage for a session."""
         if not usage:
@@ -665,14 +674,21 @@ class AgentLoop:
                                   content="New session started. Memory consolidation in progress.")
         if cmd == "/help":
             tools_status = "开启 🔧" if self._show_tool_calls(session) else "关闭"
+            thread_status = "开启（话题回复）" if self._use_thread(session) else "关闭（直接发送）"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/tools — Toggle tool call output visibility\n/help — Show available commands\n\nTool call output: {tools_status}")
+                                  content=f"🐈 nanobot commands:\n/new — Start a new conversation\n/status — Show session stats & token usage\n/tasks — List background tasks\n/tasks log <id> — View task log\n/tasks resume <id> — Resume interrupted task\n/tasks cancel <id> — Cancel running task\n/tools — Toggle tool call output visibility\n/thread — Toggle thread/topic reply mode\n/help — Show available commands\n\nTool call output: {tools_status}\n话题模式: {thread_status}")
         if cmd == "/tools":
             current = self._show_tool_calls(session)
             self._set_show_tool_calls(session, not current)
             new_state = "开启 🔧" if not current else "关闭"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=f"Tool call output: **{new_state}**")
+        if cmd == "/thread":
+            current = self._use_thread(session)
+            self._set_use_thread(session, not current)
+            new_state = "开启（话题回复）" if not current else "关闭（直接发送）"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=f"话题模式: **{new_state}**")
         if cmd == "/status":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=self._build_status(key, session))
@@ -691,6 +707,9 @@ class AgentLoop:
 
         # Determine reply_to: thread root if in thread, otherwise user's message_id
         _reply_to = (msg.metadata or {}).get("reply_to") or (msg.metadata or {}).get("message_id") or ""
+        # If thread mode is disabled, don't reply in thread
+        if session and not self._use_thread(session):
+            _reply_to = ""
         self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id, reply_to=_reply_to)
         initial_messages = self.context.build_messages(
             history=session.get_history(max_messages=self.memory_window),
