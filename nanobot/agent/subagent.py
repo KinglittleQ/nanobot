@@ -94,11 +94,18 @@ class SubagentManager:
                 pass
             logger.warning(f"Failed to save subagent registry: {e}")
 
-    def _update_task(self, task_id: str, **fields: Any) -> None:
-        """Update fields for a task and persist."""
+    def _update_task(self, task_id: str, persist: bool = True, **fields: Any) -> None:
+        """Update fields for a task and optionally persist.
+
+        Args:
+            task_id: The task to update.
+            persist: If False, update in-memory only (caller must save later).
+                     Use this in hot loops to avoid excessive disk writes.
+        """
         if task_id in self._registry:
             self._registry[task_id].update(fields)
-            self._save_registry()
+            if persist:
+                self._save_registry()
 
     # ------------------------------------------------------------------
     # Task log files
@@ -357,7 +364,8 @@ class SubagentManager:
                     break
 
                 iteration += 1
-                self._update_task(task_id, iterations=iteration, updated_at=datetime.now().isoformat())
+                # Don't persist on every iteration — save after tool calls or at completion
+                self._update_task(task_id, persist=False, iterations=iteration, updated_at=datetime.now().isoformat())
 
                 response = await self.provider.chat(
                     messages=messages,
@@ -393,7 +401,7 @@ class SubagentManager:
                     # Execute tools
                     for tool_call in response.tool_calls:
                         tc_count = self._registry.get(task_id, {}).get("tool_calls", 0) + 1
-                        self._update_task(task_id, tool_calls=tc_count)
+                        self._update_task(task_id, persist=False, tool_calls=tc_count)
 
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         self._append_log(task_id, f"TOOL: {tool_call.name}({args_str[:200]})")
@@ -411,6 +419,8 @@ class SubagentManager:
                             "name": tool_call.name,
                             "content": result,
                         })
+                    # Persist registry once after all tool calls in this round
+                    self._save_registry()
                 else:
                     final_result = response.content
                     break
