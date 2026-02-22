@@ -233,7 +233,7 @@ class AgentLoop:
 
     def _use_thread(self, session: "Session") -> bool:
         """Check if thread/topic reply mode is enabled for this session."""
-        return session.metadata.get("use_thread", True)
+        return session.metadata.get("use_thread", False)
 
     def _set_use_thread(self, session: "Session", use: bool) -> None:
         """Set thread/topic reply mode for this session."""
