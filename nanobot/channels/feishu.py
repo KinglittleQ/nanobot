@@ -711,7 +711,10 @@ class FeishuChannel(BaseChannel):
                 receive_id_type = "open_id"
 
             loop = asyncio.get_running_loop()
-            reply_to = msg.reply_to or msg.metadata.get("reply_to")
+            # reply_to: None = not set (auto-thread), "" = explicitly no thread, "om_xxx" = reply to specific message
+            raw_reply_to = msg.reply_to if msg.reply_to is not None else msg.metadata.get("reply_to")
+            reply_to = raw_reply_to if raw_reply_to else None  # normalize "" to None
+            no_thread = raw_reply_to == ""  # explicitly disabled
 
             # Helper: send a new message or reply in thread
             async def _send(msg_type: str, content: str, thread_id: str | None = None) -> str | None:
@@ -746,7 +749,8 @@ class FeishuChannel(BaseChannel):
                 if sent_msg_id:
                     msg.metadata["sent_message_id"] = sent_msg_id
                     # Use this message as thread root for subsequent media
-                    if not reply_to:
+                    # (only when threading is not explicitly disabled)
+                    if not no_thread and not reply_to:
                         thread_root = sent_msg_id
 
             # --- Send media attachments (threaded under text if applicable) ---
@@ -761,13 +765,13 @@ class FeishuChannel(BaseChannel):
                         image_key = await loop.run_in_executor(None, self._upload_image_sync, file_path)
                         if image_key:
                             mid = await _send("image", json.dumps({"image_key": image_key}), thread_root)
-                            if mid and not thread_root and not reply_to:
+                            if mid and not thread_root and not reply_to and not no_thread:
                                 thread_root = mid
                     elif ext in self._AUDIO_EXTS:
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
                         if file_key:
                             mid = await _send("audio", json.dumps({"file_key": file_key}), thread_root)
-                            if mid and not thread_root and not reply_to:
+                            if mid and not thread_root and not reply_to and not no_thread:
                                 thread_root = mid
                     elif ext in self._VIDEO_EXTS:
                         mp4_path = await loop.run_in_executor(None, self._convert_to_mp4, file_path)
@@ -785,7 +789,7 @@ class FeishuChannel(BaseChannel):
                             if image_key:
                                 media_content["image_key"] = image_key
                             mid = await _send("media", json.dumps(media_content), thread_root)
-                            if mid and not thread_root and not reply_to:
+                            if mid and not thread_root and not reply_to and not no_thread:
                                 thread_root = mid
                         if mp4_path != file_path:
                             try:
@@ -796,7 +800,7 @@ class FeishuChannel(BaseChannel):
                         file_key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
                         if file_key:
                             mid = await _send("file", json.dumps({"file_key": file_key}), thread_root)
-                            if mid and not thread_root and not reply_to:
+                            if mid and not thread_root and not reply_to and not no_thread:
                                 thread_root = mid
 
         except Exception as e:
