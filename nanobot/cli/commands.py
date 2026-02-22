@@ -431,6 +431,16 @@ def gateway(
                 chat_id=job.payload.to,
                 content=response or ""
             ))
+
+        # Trim cron sessions to prevent unbounded growth.
+        # Keep last 16 messages so the agent has recent context for the next run.
+        cron_session = session_manager.get_or_create(f"cron:{job.id}")
+        if len(cron_session.messages) > 50:
+            removed = cron_session.trim(keep=16)
+            if removed:
+                session_manager.save(cron_session)
+                logger.debug(f"Trimmed cron session cron:{job.id}: removed {removed} messages")
+
         return response
     cron.on_job = on_cron_job
     

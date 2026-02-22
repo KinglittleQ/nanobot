@@ -148,6 +148,36 @@ class Session:
         self._disk_message_count = 0
         self.updated_at = datetime.now()
 
+    def trim(self, keep: int = 16) -> int:
+        """Trim session to the last *keep* messages.
+
+        Avoids cutting inside a tool-call group (assistant with tool_calls
+        followed by tool results).  Returns the number of messages removed.
+
+        After trimming, the session must be fully re-saved (not incremental)
+        because messages were removed from the front.
+        """
+        if len(self.messages) <= keep:
+            return 0
+
+        cut = len(self.messages) - keep
+
+        # Don't cut inside a tool-call group: walk forward from the cut
+        # point until we're past any orphan tool results.
+        while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
+            cut += 1
+
+        if cut >= len(self.messages):
+            return 0  # safety: don't remove everything
+
+        removed = cut
+        self.messages = self.messages[cut:]
+        # Reset disk count so next save does a full rewrite
+        self._disk_message_count = 0
+        self.last_consolidated = max(0, self.last_consolidated - removed)
+        self.updated_at = datetime.now()
+        return removed
+
 
 class SessionManager:
     """
