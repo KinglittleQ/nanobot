@@ -279,9 +279,12 @@ class AgentLoop:
         # position *within the non-system slice of `messages`*, NOT len(session.messages).
         #
         # `initial_messages` contains: [system_prompt] + history (up to memory_window) + user_msg.
-        # The history portion was already on disk, so we start counting from there.
-        initial_non_system = sum(1 for m in initial_messages if m.get("role") != "system")
-        persisted_count = initial_non_system
+        # The history portion was already on disk.  The new user_msg is NOT yet persisted.
+        # So we start counting from the number of history messages only.
+        initial_history_count = sum(1 for m in initial_messages if m.get("role") != "system") - 1  # exclude user_msg
+        if initial_history_count < 0:
+            initial_history_count = 0
+        persisted_count = initial_history_count
 
         def _flush_to_session() -> None:
             """Incrementally persist any new messages to the session on disk."""
@@ -357,6 +360,11 @@ class AgentLoop:
                 _flush_to_session()
             else:
                 final_content = self._strip_think(response.content)
+                # Add the final assistant reply to messages so it gets persisted
+                messages = self.context.add_assistant_message(
+                    messages, response.content, tool_calls=None,
+                    reasoning_content=response.reasoning_content,
+                )
                 break
 
         # Extract non-system messages for persistence

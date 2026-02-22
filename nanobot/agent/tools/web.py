@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
-FALLBACK_PROXY = "http://127.0.0.1:7892"  # Proxy to try when direct connection fails
+FALLBACK_PROXY = "http://172.29.4.175:22222"  # Proxy to try when direct connection fails
 
 
 def _strip_tags(text: str) -> str:
