@@ -54,6 +54,27 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 }
 DEFAULT_CONTEXT_WINDOW = 128_000  # Fallback for unknown models
 
+# Model pricing per million tokens (USD).
+# Keys are substring-matched against model name (lowercase).
+# Format: {key: (input, output, cache_write, cache_read)}
+# cache_write/cache_read are None if caching is not supported.
+MODEL_PRICING: dict[str, tuple[float, float, float | None, float | None]] = {
+    # Claude models (Anthropic pricing)
+    "claude-opus-4":    (15.0,  75.0, 18.75, 1.50),
+    "claude-sonnet-4":  (3.0,   15.0, 3.75,  0.30),
+    "claude-haiku-3.5": (0.80,  4.0,  1.0,   0.08),
+    # OpenAI models
+    "gpt-4o":           (2.50,  10.0, None,   None),
+    "gpt-4o-mini":      (0.15,  0.60, None,   None),
+    "o1":               (15.0,  60.0, None,   None),
+    "o3":               (10.0,  40.0, None,   None),
+    # DeepSeek
+    "deepseek":         (0.27,  1.10, None,   None),
+    # Zhipu
+    "glm-5":            (5.0,   20.0, None,   None),
+    "glm-4":            (1.0,   5.0,  None,   None),
+}
+
 
 class AgentLoop:
     """
@@ -217,17 +238,33 @@ class AgentLoop:
                 "total_tokens": 0,
                 "llm_calls": 0,
                 "last_prompt_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "uncached_input_tokens": 0,
             }
         stats = self._usage_stats[session_key]
-        stats["prompt_tokens"] += usage.get("prompt_tokens", 0)
-        stats["completion_tokens"] += usage.get("completion_tokens", 0)
+        prompt = usage.get("prompt_tokens", 0)
+        completion = usage.get("completion_tokens", 0)
+        cache_created = usage.get("cache_creation_input_tokens", 0)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        # Uncached input = total prompt - cache_read (cache_creation counts as new input)
+        uncached = prompt - cache_read if prompt > cache_read else prompt
+
+        stats["prompt_tokens"] += prompt
+        stats["completion_tokens"] += completion
         stats["total_tokens"] += usage.get("total_tokens", 0)
         stats["llm_calls"] += 1
-        stats["last_prompt_tokens"] = usage.get("prompt_tokens", 0)
+        stats["last_prompt_tokens"] = prompt
+        stats["cache_creation_tokens"] += cache_created
+        stats["cache_read_tokens"] += cache_read
+        stats["uncached_input_tokens"] += uncached
 
     def _get_global_usage(self) -> dict[str, int]:
         """Get aggregated token usage across all sessions."""
-        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0}
+        totals = {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0,
+            "cache_creation_tokens": 0, "cache_read_tokens": 0, "uncached_input_tokens": 0,
+        }
         for stats in self._usage_stats.values():
             for k in totals:
                 totals[k] += stats.get(k, 0)
@@ -244,6 +281,50 @@ class AgentLoop:
             if key in model_lower:
                 return window
         return DEFAULT_CONTEXT_WINDOW
+
+    def _get_pricing(self) -> tuple[float, float, float | None, float | None] | None:
+        """Get pricing for the current model.
+
+        Returns (input_per_mtok, output_per_mtok, cache_write_per_mtok, cache_read_per_mtok)
+        or None if pricing is unknown.
+        """
+        model_lower = (self.model or "").lower()
+        for key, pricing in MODEL_PRICING.items():
+            if key in model_lower:
+                return pricing
+        return None
+
+    def _calculate_cost(self, stats: dict[str, int]) -> dict[str, float] | None:
+        """Calculate cost breakdown from token usage stats.
+
+        Returns dict with cost_input, cost_output, cost_cache_write, cost_cache_read, cost_total
+        or None if pricing is unknown.
+        """
+        pricing = self._get_pricing()
+        if not pricing:
+            return None
+
+        input_rate, output_rate, cache_write_rate, cache_read_rate = pricing
+
+        # Input cost: uncached tokens at full price
+        uncached = stats.get("uncached_input_tokens", 0)
+        cache_read = stats.get("cache_read_tokens", 0)
+        cache_created = stats.get("cache_creation_tokens", 0)
+        output = stats.get("completion_tokens", 0)
+
+        cost_input = uncached * input_rate / 1_000_000
+        cost_output = output * output_rate / 1_000_000
+        cost_cache_write = cache_created * (cache_write_rate or input_rate) / 1_000_000
+        cost_cache_read = cache_read * (cache_read_rate or input_rate) / 1_000_000
+        cost_total = cost_input + cost_output + cost_cache_write + cost_cache_read
+
+        return {
+            "cost_input": cost_input,
+            "cost_output": cost_output,
+            "cost_cache_write": cost_cache_write,
+            "cost_cache_read": cost_cache_read,
+            "cost_total": cost_total,
+        }
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -792,16 +873,33 @@ class AgentLoop:
         session_usage = self._usage_stats.get(session_key)
         if session_usage:
             lines.append(f"\n📊 **Token Usage (this session)**")
-            lines.append(f"  Prompt tokens: {session_usage['prompt_tokens']:,}")
-            lines.append(f"  Completion tokens: {session_usage['completion_tokens']:,}")
-            lines.append(f"  Total tokens: {session_usage['total_tokens']:,}")
+            uncached = session_usage.get('uncached_input_tokens', 0)
+            cache_read = session_usage.get('cache_read_tokens', 0)
+            cache_created = session_usage.get('cache_creation_tokens', 0)
+            completion = session_usage['completion_tokens']
+            lines.append(f"  Input: {session_usage['prompt_tokens']:,} tokens")
+            if cache_read or cache_created:
+                lines.append(f"    ├ Uncached: {uncached:,}")
+                lines.append(f"    ├ Cache read: {cache_read:,}")
+                lines.append(f"    └ Cache write: {cache_created:,}")
+            lines.append(f"  Output: {completion:,} tokens")
             lines.append(f"  LLM calls: {session_usage['llm_calls']}")
             # Show last prompt tokens vs context window
             last_prompt = session_usage.get("last_prompt_tokens", 0)
             if last_prompt:
                 pct = last_prompt * 100 // context_window
                 bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-                lines.append(f"  Context usage: {last_prompt:,}/{context_window:,} ({pct}%) [{bar}]")
+                lines.append(f"  Context: {last_prompt:,}/{context_window:,} ({pct}%) [{bar}]")
+            # Show cost breakdown
+            cost = self._calculate_cost(session_usage)
+            if cost:
+                lines.append(f"\n💰 **Cost (this session)**")
+                lines.append(f"  Input (uncached): ${cost['cost_input']:.4f}")
+                if cache_read or cache_created:
+                    lines.append(f"  Cache write: ${cost['cost_cache_write']:.4f}")
+                    lines.append(f"  Cache read: ${cost['cost_cache_read']:.4f}")
+                lines.append(f"  Output: ${cost['cost_output']:.4f}")
+                lines.append(f"  **Total: ${cost['cost_total']:.4f}**")
         else:
             lines.append(f"\n📊 **Token Usage (this session)**: no data yet")
 
@@ -809,10 +907,20 @@ class AgentLoop:
         global_usage = self._get_global_usage()
         if global_usage["llm_calls"] > 0:
             lines.append(f"\n🌐 **Token Usage (all sessions since restart)**")
-            lines.append(f"  Prompt tokens: {global_usage['prompt_tokens']:,}")
-            lines.append(f"  Completion tokens: {global_usage['completion_tokens']:,}")
-            lines.append(f"  Total tokens: {global_usage['total_tokens']:,}")
+            g_uncached = global_usage.get('uncached_input_tokens', 0)
+            g_cache_read = global_usage.get('cache_read_tokens', 0)
+            g_cache_created = global_usage.get('cache_creation_tokens', 0)
+            lines.append(f"  Input: {global_usage['prompt_tokens']:,} tokens")
+            if g_cache_read or g_cache_created:
+                lines.append(f"    ├ Uncached: {g_uncached:,}")
+                lines.append(f"    ├ Cache read: {g_cache_read:,}")
+                lines.append(f"    └ Cache write: {g_cache_created:,}")
+            lines.append(f"  Output: {global_usage['completion_tokens']:,} tokens")
             lines.append(f"  LLM calls: {global_usage['llm_calls']}")
+            # Global cost
+            global_cost = self._calculate_cost(global_usage)
+            if global_cost:
+                lines.append(f"  **Total cost: ${global_cost['cost_total']:.4f}**")
 
         # --- Subagents ---
         running_subagents = self.subagents.get_running_count()
