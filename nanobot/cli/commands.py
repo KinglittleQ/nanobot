@@ -507,31 +507,8 @@ def gateway(
                         # Explicit single target (backward compatible)
                         targets.append((notify.channel, notify.chat_id))
                     else:
-                        # Broadcast to all existing sessions (except cli:direct)
-                        for path in agent.sessions.sessions_dir.glob("*.jsonl"):
-                            stem = path.stem
-                            if stem == "cli_direct" or not stem:
-                                continue
-                            # Try reading channel/chat_id from session metadata
-                            ch_from_meta, cid_from_meta = None, None
-                            try:
-                                with open(path) as sf:
-                                    first = sf.readline().strip()
-                                    if first:
-                                        import json as _json
-                                        meta = _json.loads(first)
-                                        if meta.get("_type") == "metadata":
-                                            ch_from_meta = meta.get("channel")
-                                            cid_from_meta = meta.get("chat_id")
-                            except Exception:
-                                pass
-                            if ch_from_meta and cid_from_meta:
-                                targets.append((ch_from_meta, cid_from_meta))
-                            else:
-                                # Fallback: split filename on first underscore
-                                parts = stem.split("_", 1)
-                                if len(parts) == 2:
-                                    targets.append((parts[0], parts[1]))
+                        # Default: only notify the admin user, don't broadcast to all sessions
+                        targets.append(("feishu", "ou_4ab6c4916575f4780a9c69310e5d3e97"))
 
                     for ch, cid in targets:
                         # Skip non-user channels (cron, heartbeat, system)
