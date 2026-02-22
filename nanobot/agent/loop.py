@@ -716,32 +716,32 @@ class AgentLoop:
             prompt_tokens = self._usage_stats.get(key, {}).get("last_prompt_tokens", 0)
             context_window = self._get_context_window()
             pct = prompt_tokens * 100 // context_window if context_window else 0
-            logger.info(f"Triggering context-window consolidation for session {session.key}")
+            logger.info(
+                f"Triggering context-window consolidation for session {session.key} "
+                f"({prompt_tokens:,}/{context_window:,} tokens, {pct}%)"
+            )
 
             # Run consolidation to save old messages to HISTORY.md
             await self._consolidate_memory(session)
 
             # Truncate session messages to reduce context size.
-            # Keep only the most recent portion to get below the 80% threshold.
-            # Target: ~50% of context window worth of messages.
-            keep_count = len(session.messages) // 3  # Keep roughly 1/3
-            if keep_count < 10:
-                keep_count = 10
+            # Keep roughly 1/3 of messages to get well below 80% threshold.
             old_count = len(session.messages)
+            keep_count = max(10, old_count // 3)
             if old_count > keep_count:
                 session.messages = session.messages[-keep_count:]
                 session.last_consolidated = 0
                 self.sessions.save(session)
                 logger.info(
-                    f"Session truncated: {old_count} → {len(session.messages)} messages "
-                    f"(kept {keep_count})"
+                    f"Session truncated: {old_count} → {len(session.messages)} messages"
                 )
 
             # Notify user about the consolidation
+            new_count = len(session.messages)
             consolidation_msg = (
                 f"🧹 **Memory Consolidation**\n"
                 f"上下文使用率 {prompt_tokens:,}/{context_window:,} tokens ({pct}%) 超过 80%，"
-                f"已自动整理历史消息到 HISTORY.md 并截断 session（{old_count}→{len(session.messages)} 条消息）。"
+                f"已自动整理历史消息到 HISTORY.md 并截断 session（{old_count}→{new_count} 条消息）。"
             )
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
