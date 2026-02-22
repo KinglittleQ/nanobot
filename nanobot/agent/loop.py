@@ -562,7 +562,11 @@ class AgentLoop:
                         # Auto-set reply_to from inbound message metadata if not already set
                         # (reply_to=None means not set; reply_to="" means explicitly no thread)
                         if response.reply_to is None and msg.metadata:
-                            response.reply_to = msg.metadata.get("reply_to") or msg.metadata.get("message_id")
+                            _session = self.sessions.get_or_create(session_key)
+                            if self._use_thread(_session):
+                                response.reply_to = msg.metadata.get("reply_to") or msg.metadata.get("message_id")
+                            else:
+                                response.reply_to = ""  # explicitly no thread
                         await self.bus.publish_outbound(response)
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
