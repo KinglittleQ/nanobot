@@ -178,8 +178,11 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         images = []
         for path in media:
             p = Path(path)
-            mime, _ = mimetypes.guess_type(path)
-            if not p.is_file() or not mime or not mime.startswith("image/"):
+            if not p.is_file():
+                continue
+            # Detect actual MIME type from file content, not extension
+            mime = self._detect_image_mime(str(p))
+            if not mime or not mime.startswith("image/"):
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
@@ -187,6 +190,42 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         if not images:
             return text
         return [{"type": "text", "text": text}] + images
+    
+    def _detect_image_mime(self, path: str) -> str | None:
+        """Detect MIME type from file content, not extension."""
+        # Try using python-magic if available
+        try:
+            import magic
+            mime = magic.from_file(path, mime=True)
+            if mime and mime.startswith("image/"):
+                return mime
+        except Exception:
+            pass
+        
+        # Fallback: use mimetypes but validate with file header
+        mime, _ = mimetypes.guess_type(path)
+        
+        # Read file header to validate/fix MIME type
+        try:
+            with open(path, "rb") as f:
+                header = f.read(12)
+            
+            # JPEG: FF D8 FF
+            if header[:3] == b"\xff\xd8\xff":
+                return "image/jpeg"
+            # PNG: 89 50 4E 47 0D 0A 1A 0A
+            if header[:8] == b"\x89PNG\r\n\x1a\n":
+                return "image/png"
+            # GIF: GIF87a or GIF89a
+            if header[:6] in (b"GIF87a", b"GIF89a"):
+                return "image/gif"
+            # WebP: RIFF....WEBP
+            if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+                return "image/webp"
+        except Exception:
+            pass
+        
+        return mime
     
     def add_tool_result(
         self,
