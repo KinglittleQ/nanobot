@@ -409,7 +409,7 @@ def gateway(
                     preview = content[:300].replace("\n", " ")
                     context_lines.append(f"[{role}] {preview}")
                 if context_lines:
-                    context_summary = "\n".join(context_lines[-15:])  # Last 15 non-tool messages
+                    context_summary = "\n".join(context_lines[-100:])  # Last 100 non-tool messages
                     message = (
                         f"[主对话上下文（只读参考，不要回复这些内容）]\n"
                         f"{context_summary}\n\n"
