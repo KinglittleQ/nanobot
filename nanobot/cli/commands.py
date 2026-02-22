@@ -396,7 +396,7 @@ def gateway(
         if job.payload.deliver and job.payload.channel and job.payload.to:
             main_session_key = f"{job.payload.channel}:{job.payload.to}"
             main_session = session_manager.get_or_create(main_session_key)
-            recent = main_session.get_history(max_messages=20)
+            recent = main_session.get_history(max_messages=100)
             if recent:
                 context_lines = []
                 for m in recent:
@@ -406,7 +406,7 @@ def gateway(
                         continue
                     if isinstance(content, list):
                         content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-                    preview = content[:200].replace("\n", " ")
+                    preview = content[:300].replace("\n", " ")
                     context_lines.append(f"[{role}] {preview}")
                 if context_lines:
                     context_summary = "\n".join(context_lines[-15:])  # Last 15 non-tool messages
