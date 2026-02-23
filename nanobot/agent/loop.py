@@ -102,6 +102,7 @@ class AgentLoop:
         model: str | None = None,
         consolidation_model: str | None = None,
         subagent_model: str | None = None,
+        cron_model: str | None = None,
         max_iterations: int = 20,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -122,6 +123,7 @@ class AgentLoop:
         self.model = model or provider.get_default_model()
         self.consolidation_model = consolidation_model or self.model
         self.subagent_model = subagent_model or self.model
+        self.cron_model = cron_model or self.model
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -424,6 +426,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         session: Session | None = None,
+        model_override: str | None = None,
     ) -> tuple[str | None, list[str], list[dict], bool, int, list[str]]:
         """
         Run the agent iteration loop.
@@ -434,6 +437,7 @@ class AgentLoop:
             session: Optional session for incremental persistence. When provided,
                      new messages are saved to disk after each LLM round so that
                      progress is not lost on restart.
+            model_override: Optional model to use instead of self.model.
 
         Returns:
             Tuple of (final_content, list_of_tools_used, full_messages, hit_max, persisted_count, generated_media).
@@ -442,6 +446,7 @@ class AgentLoop:
             persisted_count is how many messages in full_messages were already saved to disk.
             generated_media is a list of file paths produced by image_gen tool.
         """
+        effective_model = model_override or self.model
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -481,7 +486,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model,
+                model=effective_model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
@@ -684,6 +689,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        model_override: str | None = None,
     ) -> OutboundMessage | None:
         """
         Process a single inbound message.
@@ -692,6 +698,7 @@ class AgentLoop:
             msg: The inbound message to process.
             session_key: Override session key (used by process_direct).
             on_progress: Optional callback for intermediate output (defaults to bus publish).
+            model_override: Optional model to use instead of self.model.
         
         Returns:
             The response message, or None if no response needed.
@@ -778,6 +785,7 @@ class AgentLoop:
         final_content, tools_used, full_messages, hit_max, persisted_count, generated_media = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
             session=session,
+            model_override=model_override,
         )
 
         # Check if context-window-based consolidation was flagged during the loop
@@ -1276,6 +1284,7 @@ Respond with ONLY valid JSON, no markdown fences."""
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        model_override: str | None = None,
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
@@ -1286,6 +1295,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             channel: Source channel (for tool context routing).
             chat_id: Source chat ID (for tool context routing).
             on_progress: Optional callback for intermediate output.
+            model_override: Optional model to use instead of self.model.
         
         Returns:
             The agent's response.
@@ -1298,5 +1308,5 @@ Respond with ONLY valid JSON, no markdown fences."""
             content=content
         )
         
-        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
+        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress, model_override=model_override)
         return response.content if response else ""

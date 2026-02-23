@@ -376,6 +376,7 @@ def gateway(
         model=config.agents.defaults.model,
         consolidation_model=config.agents.defaults.consolidation_model,
         subagent_model=config.agents.defaults.subagent_model,
+        cron_model=config.agents.defaults.cron_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -425,6 +426,7 @@ def gateway(
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
+            model_override=agent.cron_model if agent.cron_model != agent.model else None,
         )
         if job.payload.deliver and job.payload.to:
             from nanobot.bus.events import OutboundMessage
@@ -629,6 +631,7 @@ def agent(
         model=config.agents.defaults.model,
         consolidation_model=config.agents.defaults.consolidation_model,
         subagent_model=config.agents.defaults.subagent_model,
+        cron_model=config.agents.defaults.cron_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
