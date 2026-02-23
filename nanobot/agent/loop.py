@@ -100,6 +100,7 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
+        consolidation_model: str | None = None,
         max_iterations: int = 20,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -118,6 +119,7 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.consolidation_model = consolidation_model or self.model
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -1180,7 +1182,7 @@ class AgentLoop:
             old_messages = session.messages[session.last_consolidated:-keep_count]
             if not old_messages:
                 return
-            logger.info(f"Memory consolidation started: {len(session.messages)} total, {len(old_messages)} new to consolidate, {keep_count} keep")
+            logger.info(f"Memory consolidation started: {len(session.messages)} total, {len(old_messages)} new to consolidate, {keep_count} keep, model={self.consolidation_model}")
 
         lines = []
         for m in old_messages:
@@ -1233,7 +1235,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                     {"role": "system", "content": "You are a memory consolidation agent. Respond only with valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                model=self.model,
+                model=self.consolidation_model,
             )
             text = (response.content or "").strip()
             if not text:

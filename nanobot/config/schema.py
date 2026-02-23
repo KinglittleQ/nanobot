@@ -183,6 +183,7 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    consolidation_model: str | None = None  # Cheaper model for memory consolidation (defaults to main model)
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 100
