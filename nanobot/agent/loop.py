@@ -101,6 +101,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         consolidation_model: str | None = None,
+        subagent_model: str | None = None,
         max_iterations: int = 20,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -120,6 +121,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.consolidation_model = consolidation_model or self.model
+        self.subagent_model = subagent_model or self.model
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -136,7 +138,7 @@ class AgentLoop:
             provider=provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=self.subagent_model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
