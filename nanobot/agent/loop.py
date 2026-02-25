@@ -388,6 +388,16 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
+    def _tool_hint(tool_calls: list) -> str:
+        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
+        def _fmt(tc):
+            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+            if not isinstance(val, str):
+                return tc.name
+            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+        return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
     def _format_tool_detail(name: str, arguments: dict, result: str, max_lines: int = 5, verbose: bool = True) -> str:
         """Format a complete tool call with arguments and result for user display.
         
@@ -519,6 +529,8 @@ class AgentLoop:
                     clean = self._strip_think(response.content)
                     if clean:
                         await on_progress(clean)
+                    else:
+                        await on_progress(self._tool_hint(response.tool_calls))
 
                 # Check if tool call output should be shown to user
                 _show_tools = self._show_tool_calls(session) if session else self.verbose_tool_output
