@@ -522,8 +522,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        import time as _time
-        tz = _time.strftime("%Z") or "UTC"
+        tz = time.strftime("%Z") or "UTC"
 
         return f"""# Subagent
 

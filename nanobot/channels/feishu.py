@@ -167,9 +167,10 @@ class FeishuChannel(BaseChannel):
     
     name = "feishu"
     
-    def __init__(self, config: FeishuConfig, bus: MessageBus):
+    def __init__(self, config: FeishuConfig, bus: MessageBus, workspace: "Path | None" = None):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
+        self._workspace = workspace
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
@@ -623,7 +624,10 @@ class FeishuChannel(BaseChannel):
         """Remove session file for a chat the bot is no longer in."""
         try:
             from pathlib import Path
-            sessions_dir = Path.home() / ".nanobot" / "workspace" / "sessions"
+            if self._workspace:
+                sessions_dir = self._workspace / "sessions"
+            else:
+                sessions_dir = Path.home() / ".nanobot" / "workspace" / "sessions"
             session_file = sessions_dir / f"feishu_{chat_id}.jsonl"
             if session_file.exists():
                 session_file.unlink()

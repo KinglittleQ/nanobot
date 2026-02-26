@@ -3,6 +3,8 @@
 import base64
 import mimetypes
 import platform
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -196,10 +198,8 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         messages.extend(history)
 
         # Current message with dynamic context (time) injected
-        from datetime import datetime
-        import time as _time
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
+        tz = time.strftime("%Z") or "UTC"
         timestamped_message = f"[{now} ({tz})]\n{current_message}"
 
         user_content = self._build_user_content(timestamped_message, media)
