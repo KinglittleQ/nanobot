@@ -23,6 +23,10 @@ from typing import Any
 # Used to trigger memory consolidation when prompt_tokens exceeds 80% of the window.
 # Keys are substring-matched against model name (lowercase).
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # Cloudsway proxy models (actual limits differ from official)
+    "cloudsway-claude-opus-4.6-cache-1m": 1_000_000,
+    "cloudsway-claude-opus-4.6-cache": 200_000,
+    "cloudsway-claude-sonnet-4.6-cache": 200_000,
     # Claude models
     "-1m": 1_000_000,               # Any model with -1M suffix
     "claude-opus-4.6-cache": 1_000_000,
@@ -100,6 +104,10 @@ def get_pricing(model: str) -> tuple[float, float, float | None, float | None] |
 # Default context window sizes for known models (in tokens).
 # Keys are substring-matched against model name (lowercase).
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # Cloudsway proxy models (actual limits differ from official)
+    "cloudsway-claude-opus-4.6-cache-1m": 1_000_000,
+    "cloudsway-claude-opus-4.6-cache": 200_000,
+    "cloudsway-claude-sonnet-4.6-cache": 200_000,
     # Claude models
     "-1m": 1_000_000,
     "claude-opus-4.6-cache": 1_000_000,
