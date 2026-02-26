@@ -137,15 +137,27 @@ class Session:
             self.messages.append(_strip_base64_images(msg))
         self.updated_at = datetime.now()
 
-    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+    def get_history(self, max_messages: int = 500, max_tokens: int | None = None) -> list[dict[str, Any]]:
         """Get recent messages in LLM format, preserving tool metadata.
 
         After truncating to *max_messages*, the cut-off point may land in the
         middle of a tool_use / tool_result group, leaving orphaned messages
         that would cause a 400 error from Claude.  We sanitize the result to
         remove any such orphans.
+
+        If *max_tokens* is given, further trim from the front so that the
+        estimated token count (chars // 4) stays within that budget.
         """
         recent = self.messages[-max_messages:]
+
+        # Token-budget trimming: drop oldest messages until estimated tokens fit
+        if max_tokens is not None:
+            budget_chars = max_tokens * 4
+            total_chars = sum(len(json.dumps(m)) for m in recent)
+            while recent and total_chars > budget_chars:
+                removed = recent[0]
+                total_chars -= len(json.dumps(removed))
+                recent = recent[1:]
 
         # --- smart truncation: avoid cutting inside a tool-call group ---
         # Walk forward from the start of `recent` and skip any leading

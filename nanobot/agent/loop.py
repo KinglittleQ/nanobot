@@ -779,7 +779,10 @@ class AgentLoop:
             _reply_to = ""
         self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id, reply_to=_reply_to)
         initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
+            history=session.get_history(
+                max_messages=self.memory_window,
+                max_tokens=int(get_context_window(self.model) * 0.70),
+            ),
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
@@ -1066,7 +1069,10 @@ class AgentLoop:
         session = self.sessions.get_or_create(session_key)
         self._set_tool_context(origin_channel, origin_chat_id)
         initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
+            history=session.get_history(
+                max_messages=self.memory_window,
+                max_tokens=int(get_context_window(self.model) * 0.70),
+            ),
             current_message=f"[System: {msg.sender_id}] {msg.content}",
             channel=origin_channel,
             chat_id=origin_chat_id,
