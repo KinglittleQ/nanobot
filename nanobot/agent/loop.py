@@ -750,12 +750,14 @@ class AgentLoop:
         if cmd == "/tools":
             current = self._show_tool_calls(session)
             self._set_show_tool_calls(session, not current)
+            self.sessions.save(session)  # persist metadata change
             new_state = "开启 🔧" if not current else "关闭"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=f"Tool call output: **{new_state}**")
         if cmd == "/thread":
             current = self._use_thread(session)
             self._set_use_thread(session, not current)
+            self.sessions.save(session)  # persist metadata change
             new_state = "开启（话题回复）" if not current else "关闭（直接发送）"
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=f"话题模式: **{new_state}**")
