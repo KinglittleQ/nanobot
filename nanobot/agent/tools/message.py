@@ -95,8 +95,16 @@ class MessageTool(Tool):
 
         # Determine reply_to:
         # 1. From tool context (replying to user's message) — highest priority
+        #    "" means explicitly no thread (e.g. cron tasks with thread mode off)
         # 2. From self._thread_root_id (follow-up in a proactive thread)
-        reply_to = get_tool_reply_to() or self._thread_root_id or None
+        ctx_reply_to = get_tool_reply_to()
+        if ctx_reply_to is not None:
+            # "" = explicitly no thread; "om_xxx" = reply to specific message
+            reply_to = ctx_reply_to if ctx_reply_to else None
+            no_thread = ctx_reply_to == ""
+        else:
+            reply_to = self._thread_root_id or None
+            no_thread = False
 
         msg = OutboundMessage(
             channel=channel,
@@ -109,7 +117,7 @@ class MessageTool(Tool):
         try:
             # If we have send_and_wait and this is the first proactive message,
             # use it to capture the sent_message_id for threading.
-            if self._send_and_wait and not reply_to:
+            if self._send_and_wait and not reply_to and not no_thread:
                 metadata = await self._send_and_wait(msg, 15.0)
                 sent_id = metadata.get("sent_message_id")
                 if sent_id:
@@ -118,7 +126,7 @@ class MessageTool(Tool):
                 await self._send_callback(msg)
                 # If msg was sent via send_callback and metadata was populated
                 sent_id = msg.metadata.get("sent_message_id")
-                if sent_id and not self._thread_root_id and not get_tool_reply_to():
+                if sent_id and not self._thread_root_id and not no_thread:
                     self._thread_root_id = sent_id
 
             media_info = f" with {len(media)} attachments" if media else ""
