@@ -838,16 +838,17 @@ class FeishuChannel(BaseChannel):
             while len(self._processed_message_ids) > 1000:
                 self._processed_message_ids.popitem(last=False)
             
-            # Skip bot messages
             sender_type = sender.sender_type
-            if sender_type == "bot":
-                return
-            
             sender_id = sender.sender_id.open_id if sender.sender_id else "unknown"
             chat_id = message.chat_id
             chat_type = message.chat_type  # "p2p" or "group"
             msg_type = message.message_type
-            
+
+            # Skip our own messages (prevent self-loop)
+            if sender_type == "bot" and sender_id == self._bot_open_id:
+                logger.debug(f"Ignoring own bot message: {message_id}")
+                return
+
             # In group chats, respond when:
             # 1. Bot is @mentioned, OR
             # 2. Message is a reply in a thread started/involving the bot
@@ -857,6 +858,10 @@ class FeishuChannel(BaseChannel):
                 if not is_mentioned and not is_thread:
                     logger.debug(f"Ignoring group message without bot mention or thread: {message_id}")
                     return
+            
+            # For bot senders, log it clearly
+            if sender_type == "bot":
+                logger.info(f"Received message from another bot (open_id={sender_id})")
             
             # Add reaction to indicate "seen"
             await self._add_reaction(message_id, "Get")
