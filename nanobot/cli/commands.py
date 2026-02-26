@@ -442,6 +442,7 @@ def gateway(
                 chat_id=job.payload.to,
                 content=resp_content,
                 media=resp_media,
+                reply_to="",  # "" = no thread mode
             ))
 
         # Trim cron sessions to prevent unbounded growth.
