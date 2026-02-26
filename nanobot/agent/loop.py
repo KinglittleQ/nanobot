@@ -1297,7 +1297,7 @@ Respond with ONLY valid JSON, no markdown fences."""
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         model_override: str | None = None,
-    ) -> str:
+    ) -> "OutboundMessage | str":
         """
         Process a message directly (for CLI or cron usage).
         
@@ -1310,7 +1310,9 @@ Respond with ONLY valid JSON, no markdown fences."""
             model_override: Optional model to use instead of self.model.
         
         Returns:
-            The agent's response.
+            OutboundMessage (with content + media). Falls back to empty string on error.
+            For backward compatibility, callers that only use .content can still do
+            ``response.content if hasattr(response, 'content') else response``.
         """
         await self._connect_mcp()
         msg = InboundMessage(
@@ -1321,4 +1323,5 @@ Respond with ONLY valid JSON, no markdown fences."""
         )
         
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress, model_override=model_override)
-        return response.content if response else ""
+        # Return the full OutboundMessage so callers can access .media
+        return response if response else ""

@@ -430,10 +430,18 @@ def gateway(
         )
         if job.payload.deliver and job.payload.to:
             from nanobot.bus.events import OutboundMessage
+            # process_direct now returns OutboundMessage (with media) or "" on error
+            if hasattr(response, 'content'):
+                resp_content = response.content or ""
+                resp_media = response.media or []
+            else:
+                resp_content = response or ""
+                resp_media = []
             await bus.publish_outbound(OutboundMessage(
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to,
-                content=response or ""
+                content=resp_content,
+                media=resp_media,
             ))
 
         # Trim cron sessions to prevent unbounded growth.
