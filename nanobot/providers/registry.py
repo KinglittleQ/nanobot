@@ -26,7 +26,7 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Claude models
     "-1m": 1_000_000,               # Any model with -1M suffix
     "claude-opus-4.6-cache": 1_000_000,
-    "claude-sonnet-4.6-cache": 1_000_000,
+    "claude-sonnet-4.6-cache": 200_000,
     "claude-opus": 200_000,
     "claude-sonnet": 200_000,
     "claude-haiku": 200_000,
@@ -103,7 +103,7 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Claude models
     "-1m": 1_000_000,
     "claude-opus-4.6-cache": 1_000_000,
-    "claude-sonnet-4.6-cache": 1_000_000,
+    "claude-sonnet-4.6-cache": 200_000,
     "claude-opus": 200_000,
     "claude-sonnet": 200_000,
     "claude-haiku": 200_000,
