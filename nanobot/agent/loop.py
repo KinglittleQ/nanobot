@@ -528,15 +528,16 @@ class AgentLoop:
                 break
 
             if response.has_tool_calls:
+                # Check if tool call output should be shown to user
+                _show_tools = self._show_tool_calls(session) if session else self.verbose_tool_output
+
                 if on_progress:
                     clean = self._strip_think(response.content)
                     if clean:
                         await on_progress(clean)
-                    else:
+                    elif _show_tools:
+                        # Only send tool hint when tool display is enabled
                         await on_progress(self._tool_hint(response.tool_calls))
-
-                # Check if tool call output should be shown to user
-                _show_tools = self._show_tool_calls(session) if session else self.verbose_tool_output
 
                 tool_call_dicts = [
                     {
