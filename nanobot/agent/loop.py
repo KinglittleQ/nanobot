@@ -255,7 +255,6 @@ class AgentLoop:
         max_iterations: int = 20,
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        memory_window: int = 9999,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -276,7 +275,6 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -459,7 +457,6 @@ class AgentLoop:
         # position *within the non-system slice of `messages`*, NOT len(session.messages).
         #
         # `initial_messages` contains: [system_prompt] + full history + user_msg.
-        # We load ALL session messages (memory_window=9999) so the prefix stays
         # stable across turns, maximizing prompt cache hits.  Truncation is
         # handled exclusively by the 80%-context-window consolidation mechanism.
         # The history portion was already on disk.  The new user_msg is NOT yet persisted.
@@ -780,7 +777,6 @@ class AgentLoop:
         self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id, reply_to=_reply_to)
         initial_messages = self.context.build_messages(
             history=session.get_history(
-                max_messages=self.memory_window,
                 max_tokens=int(get_context_window(self.model) * 0.70),
             ),
             current_message=msg.content,
@@ -1070,7 +1066,6 @@ class AgentLoop:
         self._set_tool_context(origin_channel, origin_chat_id)
         initial_messages = self.context.build_messages(
             history=session.get_history(
-                max_messages=self.memory_window,
                 max_tokens=int(get_context_window(self.model) * 0.70),
             ),
             current_message=f"[System: {msg.sender_id}] {msg.content}",

@@ -321,6 +321,22 @@ class FeishuChannel(BaseChannel):
                         content = content.replace(key, "").strip()
         return content
 
+    def _resolve_mentions(self, content: str, message) -> str:
+        """Replace @mention placeholders with real open_id in content."""
+        mentions = getattr(message, "mentions", None)
+        if not mentions:
+            return content
+        for mention in mentions:
+            key = getattr(mention, "key", None)
+            mid = getattr(mention, "id", None)
+            name = getattr(mention, "name", None)
+            if key and mid:
+                open_id = getattr(mid, "open_id", None)
+                if open_id:
+                    replacement = f"@{name}({open_id})" if name else f"@{open_id}"
+                    content = content.replace(key, replacement)
+        return content
+
     async def _buffer_group_message(self, message, sender_id: str, sender_type: str) -> None:
         """Parse and buffer a group message for future context injection."""
         import datetime
@@ -340,8 +356,11 @@ class FeishuChannel(BaseChannel):
         if not content:
             return
 
+        # Replace @mention placeholders with real open_id
+        content = self._resolve_mentions(content, message)
+
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        label = f"bot({sender_id[:8]})" if sender_type == "bot" else f"user({sender_id[:8]})"
+        label = f"bot({sender_id})" if sender_type == "bot" else f"user({sender_id})"
         entry = (sender_id, sender_type, content, timestamp)
 
         buf = self._group_msg_buffer.setdefault(chat_id, [])
@@ -358,7 +377,7 @@ class FeishuChannel(BaseChannel):
         recent = buf[-max_msgs:]
         lines = []
         for sender_id, sender_type, content, timestamp in recent:
-            label = f"bot({sender_id[:8]})" if sender_type == "bot" else f"user({sender_id[:8]})"
+            label = f"bot({sender_id})" if sender_type == "bot" else f"user({sender_id})"
             lines.append(f"[{timestamp}] {label}: {content}")
         # Clear buffer after injecting into context
         self._group_msg_buffer[chat_id] = []
