@@ -15,6 +15,156 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# ---------------------------------------------------------------------------
+# Model catalog — context windows and pricing
+# ---------------------------------------------------------------------------
+
+# Default context window sizes for known models (in tokens).
+# Used to trigger memory consolidation when prompt_tokens exceeds 80% of the window.
+# Keys are substring-matched against model name (lowercase).
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # Claude models
+    "-1m": 1_000_000,               # Any model with -1M suffix
+    "claude-opus-4.6-cache": 1_000_000,
+    "claude-sonnet-4.6-cache": 1_000_000,
+    "claude-opus": 200_000,
+    "claude-sonnet": 200_000,
+    "claude-haiku": 200_000,
+    # OpenAI models
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 8_192,
+    "gpt-3.5": 16_385,
+    "o1": 200_000,
+    "o3": 200_000,
+    # DeepSeek models
+    "deepseek": 64_000,
+    # Zhipu models
+    "glm-5": 128_000,
+    "glm-4": 128_000,
+    # Gemini models
+    "gemini-2": 1_000_000,
+    "gemini-1.5": 1_000_000,
+    # Qwen models
+    "qwen": 128_000,
+}
+DEFAULT_CONTEXT_WINDOW = 128_000  # Fallback for unknown models
+
+# Model pricing per million tokens (USD).
+# Keys are substring-matched against model name (lowercase).
+# Format: {key: (input, output, cache_write, cache_read)}
+# cache_write/cache_read are None if caching is not supported.
+MODEL_PRICING: dict[str, tuple[float, float, float | None, float | None]] = {
+    # Claude models (Anthropic pricing)
+    "claude-opus-4.6-cache-1m": (10.0,  37.5,  12.5,  1.0),
+    "claude-opus-4.6":          (5.0,   25.0,  6.25,  0.50),
+    "claude-opus-4.5":          (5.0,   25.0,  6.25,  0.50),
+    "claude-opus-4":            (15.0,  75.0,  18.75, 1.50),
+    "claude-sonnet-4":          (3.0,   15.0,  3.75,  0.30),
+    "claude-haiku":             (0.80,  4.0,   1.0,   0.08),
+    # OpenAI models
+    "gpt-4o":                   (2.50,  10.0,  None,  None),
+    "gpt-4o-mini":              (0.15,  0.60,  None,  None),
+    "o1":                       (15.0,  60.0,  None,  None),
+    "o3":                       (10.0,  40.0,  None,  None),
+    # DeepSeek
+    "deepseek":                 (0.27,  1.10,  None,  None),
+    # Zhipu
+    "glm-5":                    (5.0,   20.0,  None,  None),
+    "glm-4":                    (1.0,   5.0,   None,  None),
+}
+
+
+def get_context_window(model: str) -> int:
+    """Return context window size for a model (substring match, case-insensitive)."""
+    model_lower = model.lower()
+    for key, window in MODEL_CONTEXT_WINDOWS.items():
+        if key in model_lower:
+            return window
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def get_pricing(model: str) -> tuple[float, float, float | None, float | None] | None:
+    """Return (input, output, cache_write, cache_read) per MTok, or None if unknown."""
+    model_lower = model.lower()
+    for key, pricing in MODEL_PRICING.items():
+        if key in model_lower:
+            return pricing
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Model catalog — context windows and pricing
+# ---------------------------------------------------------------------------
+
+# Default context window sizes for known models (in tokens).
+# Keys are substring-matched against model name (lowercase).
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # Claude models
+    "-1m": 1_000_000,
+    "claude-opus-4.6-cache": 1_000_000,
+    "claude-sonnet-4.6-cache": 1_000_000,
+    "claude-opus": 200_000,
+    "claude-sonnet": 200_000,
+    "claude-haiku": 200_000,
+    # OpenAI models
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 8_192,
+    "gpt-3.5": 16_385,
+    "o1": 200_000,
+    "o3": 200_000,
+    # DeepSeek
+    "deepseek": 64_000,
+    # Zhipu
+    "glm-5": 128_000,
+    "glm-4": 128_000,
+    # Gemini
+    "gemini-2": 1_000_000,
+    "gemini-1.5": 1_000_000,
+    # Qwen
+    "qwen": 128_000,
+}
+DEFAULT_CONTEXT_WINDOW = 128_000
+
+# Model pricing per million tokens (USD).
+# Format: {key: (input, output, cache_write, cache_read)}
+# cache_write/cache_read are None if caching is not supported.
+MODEL_PRICING: dict[str, tuple[float, float, float | None, float | None]] = {
+    "claude-opus-4.6-cache-1m": (10.0,  37.5, 12.5,  1.0),
+    "claude-opus-4.6":          (5.0,   25.0, 6.25,  0.50),
+    "claude-opus-4.5":          (5.0,   25.0, 6.25,  0.50),
+    "claude-opus-4":            (15.0,  75.0, 18.75, 1.50),
+    "claude-sonnet-4":          (3.0,   15.0, 3.75,  0.30),
+    "claude-haiku":             (0.80,  4.0,  1.0,   0.08),
+    "gpt-4o":                   (2.50,  10.0, None,  None),
+    "gpt-4o-mini":              (0.15,  0.60, None,  None),
+    "o1":                       (15.0,  60.0, None,  None),
+    "o3":                       (10.0,  40.0, None,  None),
+    "deepseek":                 (0.27,  1.10, None,  None),
+    "glm-5":                    (5.0,   20.0, None,  None),
+    "glm-4":                    (1.0,   5.0,  None,  None),
+}
+
+
+def get_context_window(model: str) -> int:
+    """Return context window size for the given model name (substring match)."""
+    model_lower = model.lower()
+    for key, window in MODEL_CONTEXT_WINDOWS.items():
+        if key in model_lower:
+            return window
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def get_pricing(model: str) -> tuple[float, float, float | None, float | None] | None:
+    """Return (input, output, cache_write, cache_read) per MTok, or None if unknown."""
+    model_lower = model.lower()
+    for key, pricing in MODEL_PRICING.items():
+        if key in model_lower:
+            return pricing
+    return None
+
+
 @dataclass(frozen=True)
 class ProviderSpec:
     """One LLM provider's metadata."""

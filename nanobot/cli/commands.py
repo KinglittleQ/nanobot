@@ -148,6 +148,70 @@ def main(
     pass
 
 
+def _make_cron_callback(agent: "AgentLoop", bus: "MessageBus", session_manager: "SessionManager"):
+    """Return an async cron-job callback bound to the given agent/bus/session_manager."""
+    from nanobot.bus.events import OutboundMessage
+
+    async def on_cron_job(job):
+        """Execute a cron job through the agent."""
+        from loguru import logger
+        message = job.payload.message
+
+        # Inject recent main session context when delivering to a user channel
+        if job.payload.deliver and job.payload.channel and job.payload.to:
+            main_session_key = f"{job.payload.channel}:{job.payload.to}"
+            main_session = session_manager.get_or_create(main_session_key)
+            recent = main_session.get_history(max_messages=16)
+            if recent:
+                context_lines = []
+                for m in recent:
+                    role = m.get("role", "?")
+                    content = m.get("content", "")
+                    if role == "tool" or not content:
+                        continue
+                    if isinstance(content, list):
+                        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+                    ts = m.get("timestamp", "")[:16]
+                    context_lines.append(f"[{role}]{' [' + ts + ']' if ts else ''} {content[:300].replace(chr(10), ' ')}")
+                if context_lines:
+                    message = (
+                        f"[主对话上下文（只读参考，不要回复这些内容）]\n"
+                        f"{chr(10).join(context_lines[-16:])}\n\n"
+                        f"[当前任务]\n{job.payload.message}"
+                    )
+
+        response = await agent.process_direct(
+            message,
+            session_key=f"cron:{job.id}",
+            channel=job.payload.channel or "cli",
+            chat_id=job.payload.to or "direct",
+            model_override=agent.cron_model if agent.cron_model != agent.model else None,
+        )
+
+        if job.payload.deliver and job.payload.to:
+            resp_content = response.content if hasattr(response, "content") else (response or "")
+            resp_media = response.media if hasattr(response, "media") else []
+            await bus.publish_outbound(OutboundMessage(
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to,
+                content=resp_content,
+                media=resp_media,
+                reply_to="",
+            ))
+
+        # Trim cron sessions to prevent unbounded growth
+        cron_session = session_manager.get_or_create(f"cron:{job.id}")
+        if len(cron_session.messages) > 50:
+            removed = cron_session.trim(keep=16)
+            if removed:
+                session_manager.save(cron_session)
+                logger.debug(f"Trimmed cron session cron:{job.id}: removed {removed} messages")
+
+        return response
+
+    return on_cron_job
+
+
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
     from nanobot.providers.custom_provider import CustomProvider
@@ -184,6 +248,8 @@ def _make_provider(config: Config):
 # ============================================================================
 # Gateway / Server
 # ============================================================================
+
+
 
 
 @app.command()
@@ -254,72 +320,7 @@ def gateway(
     )
     
     # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        message = job.payload.message
-
-        # If this job delivers to a user channel, inject recent main session
-        # context so the cron task can see what the user has been talking about.
-        if job.payload.deliver and job.payload.channel and job.payload.to:
-            main_session_key = f"{job.payload.channel}:{job.payload.to}"
-            main_session = session_manager.get_or_create(main_session_key)
-            recent = main_session.get_history(max_messages=16)
-            if recent:
-                context_lines = []
-                for m in recent:
-                    role = m.get("role", "?")
-                    content = m.get("content", "")
-                    if role == "tool" or not content:
-                        continue
-                    if isinstance(content, list):
-                        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-                    preview = content[:300].replace("\n", " ")
-                    ts = m.get("timestamp", "")[:16]  # YYYY-MM-DD HH:MM
-                    ts_prefix = f" [{ts}]" if ts else ""
-                    context_lines.append(f"[{role}]{ts_prefix} {preview}")
-                if context_lines:
-                    context_summary = "\n".join(context_lines[-16:])  # Last 16 non-tool messages
-                    message = (
-                        f"[主对话上下文（只读参考，不要回复这些内容）]\n"
-                        f"{context_summary}\n\n"
-                        f"[当前任务]\n{job.payload.message}"
-                    )
-
-        response = await agent.process_direct(
-            message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-            model_override=agent.cron_model if agent.cron_model != agent.model else None,
-        )
-        if job.payload.deliver and job.payload.to:
-            from nanobot.bus.events import OutboundMessage
-            # process_direct now returns OutboundMessage (with media) or "" on error
-            if hasattr(response, 'content'):
-                resp_content = response.content or ""
-                resp_media = response.media or []
-            else:
-                resp_content = response or ""
-                resp_media = []
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=resp_content,
-                media=resp_media,
-                reply_to="",  # "" = no thread mode
-            ))
-
-        # Trim cron sessions to prevent unbounded growth.
-        # Keep last 16 messages so the agent has recent context for the next run.
-        cron_session = session_manager.get_or_create(f"cron:{job.id}")
-        if len(cron_session.messages) > 50:
-            removed = cron_session.trim(keep=16)
-            if removed:
-                session_manager.save(cron_session)
-                logger.debug(f"Trimmed cron session cron:{job.id}: removed {removed} messages")
-
-        return response
-    cron.on_job = on_cron_job
+    cron.on_job = _make_cron_callback(agent, bus, session_manager)
     
     # Create heartbeat service
     async def on_heartbeat(prompt: str) -> str:

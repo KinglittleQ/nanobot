@@ -2,11 +2,13 @@
 
 import asyncio
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 import json
 import json_repair
 import os
 from pathlib import Path
 import re
+import time as _time
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -14,6 +16,7 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
+from nanobot.providers.registry import get_context_window, get_pricing
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
@@ -29,60 +32,203 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
 
 
-# Default context window sizes for known models (in tokens).
-# Used to trigger memory consolidation when prompt_tokens exceeds 80% of the window.
-MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    # Claude models
-    "-1m": 1_000_000,  # Any model with -1M suffix (e.g. claude-opus-4.6-cache-1M)
-    # cloudsway 1M context models (model name contains "cache" suffix, no "-1m")
-    "claude-opus-4.6-cache": 1_000_000,
-    "claude-sonnet-4.6-cache": 1_000_000,
-    "claude-opus": 200_000,
-    "claude-sonnet": 200_000,
-    "claude-haiku": 200_000,
-    # OpenAI models
-    "gpt-4o": 128_000,
-    "gpt-4-turbo": 128_000,
-    "gpt-4": 8_192,
-    "gpt-3.5": 16_385,
-    "o1": 200_000,
-    "o3": 200_000,
-    # DeepSeek models
-    "deepseek": 64_000,
-    # Zhipu models
-    "glm-5": 128_000,
-    "glm-4": 128_000,
-    # Gemini models
-    "gemini-2": 1_000_000,
-    "gemini-1.5": 1_000_000,
-    # Qwen models
-    "qwen": 128_000,
-}
-DEFAULT_CONTEXT_WINDOW = 128_000  # Fallback for unknown models
+@dataclass
+class LoopResult:
+    """Result of a single _run_agent_loop() execution."""
+    final_content: str | None
+    tools_used: list[str]
+    messages: list[dict]          # all non-system messages from the loop
+    hit_max: bool                 # True if max_iterations was reached
+    persisted_count: int          # messages already saved to disk
+    generated_media: list[str]    # file paths from image_gen tool
 
-# Model pricing per million tokens (USD).
-# Keys are substring-matched against model name (lowercase).
-# Format: {key: (input, output, cache_write, cache_read)}
-# cache_write/cache_read are None if caching is not supported.
-MODEL_PRICING: dict[str, tuple[float, float, float | None, float | None]] = {
-    # Claude models (Anthropic pricing)
-    "claude-opus-4.6-cache-1m": (10.0, 37.5, 12.5, 1.0),
-    "claude-opus-4.6":  (5.0,   25.0, 6.25,  0.50),
-    "claude-opus-4.5":  (5.0,   25.0, 6.25,  0.50),
-    "claude-opus-4":    (15.0,  75.0, 18.75, 1.50),
-    "claude-sonnet-4":  (3.0,   15.0, 3.75,  0.30),
-    "claude-haiku":     (0.80,  4.0,  1.0,   0.08),
-    # OpenAI models
-    "gpt-4o":           (2.50,  10.0, None,   None),
-    "gpt-4o-mini":      (0.15,  0.60, None,   None),
-    "o1":               (15.0,  60.0, None,   None),
-    "o3":               (10.0,  40.0, None,   None),
-    # DeepSeek
-    "deepseek":         (0.27,  1.10, None,   None),
-    # Zhipu
-    "glm-5":            (5.0,   20.0, None,   None),
-    "glm-4":            (1.0,   5.0,  None,   None),
-}
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (no need to bind to AgentLoop)
+# ---------------------------------------------------------------------------
+
+def _strip_think(text: str | None) -> str | None:
+    """Remove <think>…</think> blocks that some models embed in content."""
+    if not text:
+        return None
+    return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+
+
+def _tool_hint(tool_calls: list) -> str:
+    """Format tool calls as a concise hint, e.g. 'web_search("query")'."""
+    def _fmt(tc):
+        val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+        if not isinstance(val, str):
+            return tc.name
+        return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+    return ", ".join(_fmt(tc) for tc in tool_calls)
+
+
+def _format_tool_detail(name: str, arguments: dict, result: str, max_lines: int = 5) -> str:
+    """Format a tool call with arguments and result for user display."""
+    args_str = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else "{}"
+    lines = result.splitlines()
+    if len(lines) > max_lines:
+        result_display = "\n".join(lines[:max_lines]) + f"\n... ({len(lines)} lines total, showing first {max_lines})"
+    else:
+        result_display = result
+    return f"🔧 **{name}**\n```\n{args_str}\n```\n📤 Result:\n```\n{result_display}\n```"
+
+
+def _build_status_report(
+    model: str,
+    start_time: float | None,
+    session_key: str,
+    session: Session,
+    usage_stats: dict,
+    show_tool_calls: bool,
+    running_subagents: int,
+    active_sessions: int,
+) -> str:
+    """Build the /status report string (pure function, no AgentLoop dependency)."""
+    context_window = get_context_window(model)
+    lines = ["🐈 **nanobot status**\n"]
+
+    # Uptime
+    if start_time:
+        elapsed = _time.time() - start_time
+        hours, rem = divmod(int(elapsed), 3600)
+        minutes, secs = divmod(rem, 60)
+        lines.append(f"⏱ Uptime: {hours}h {minutes}m {secs}s" if hours else f"⏱ Uptime: {minutes}m {secs}s")
+
+    lines.append(f"🤖 Model: `{model}`")
+    lines.append(f"📏 Context window: {context_window:,} tokens")
+    lines.append(f"🔧 Tool call output: {'开启' if show_tool_calls else '关闭'}")
+
+    # Session info
+    msgs = session.messages
+    user_c = sum(1 for m in msgs if m.get("role") == "user")
+    asst_c = sum(1 for m in msgs if m.get("role") == "assistant")
+    tool_c = sum(1 for m in msgs if m.get("role") == "tool")
+    lines.append(f"\n📋 **Session** (`{session_key}`)")
+    lines.append(f"  Messages: {len(msgs)} (user: {user_c}, assistant: {asst_c}, tool: {tool_c})")
+
+    def _cost_lines(sus: dict, prefix: str = "") -> list[str]:
+        """Format token usage + cost lines for one usage dict."""
+        out = []
+        uncached = sus.get("uncached_input_tokens", 0)
+        cache_read = sus.get("cache_read_tokens", 0)
+        cache_created = sus.get("cache_creation_tokens", 0)
+        completion = sus.get("completion_tokens", 0)
+        out.append(f"{prefix}Input: {sus.get('prompt_tokens', 0):,} tokens")
+        if cache_read or cache_created:
+            out.append(f"{prefix}  ├ Uncached: {uncached:,}")
+            out.append(f"{prefix}  ├ Cache read: {cache_read:,}")
+            out.append(f"{prefix}  └ Cache write: {cache_created:,}")
+        out.append(f"{prefix}Output: {completion:,} tokens")
+        out.append(f"{prefix}LLM calls: {sus.get('llm_calls', 0)}")
+        pricing = get_pricing(model)
+        if pricing:
+            ir, or_, cwr, crr = pricing
+            ci = uncached * ir / 1_000_000
+            co = completion * or_ / 1_000_000
+            ccw = cache_created * (cwr or ir) / 1_000_000
+            ccr = cache_read * (crr or ir) / 1_000_000
+            total = ci + co + ccw + ccr
+            out.append(f"{prefix}Cost: input ${ci:.4f} + output ${co:.4f}" +
+                       (f" + cache_w ${ccw:.4f} + cache_r ${ccr:.4f}" if cache_read or cache_created else "") +
+                       f" = **${total:.4f}**")
+        return out
+
+    # Session token usage
+    session_usage = usage_stats.get(session_key)
+    if session_usage:
+        lines.append("\n📊 **Token Usage (this session)**")
+        lines.extend(_cost_lines(session_usage, prefix="  "))
+        last_prompt = session_usage.get("last_prompt_tokens", 0)
+        if last_prompt:
+            pct = last_prompt * 100 // context_window
+            bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+            lines.append(f"  Context: {last_prompt:,}/{context_window:,} ({pct}%) [{bar}]")
+    else:
+        lines.append("\n📊 **Token Usage (this session)**: no data yet")
+
+    # Other sessions
+    others = {k: v for k, v in usage_stats.items() if k != session_key and v.get("llm_calls", 0) > 0}
+    if others:
+        lines.append("\n📊 **Other Sessions**")
+        for skey, sus in sorted(others.items(), key=lambda x: x[1].get("total_tokens", 0), reverse=True):
+            pricing = get_pricing(model)
+            cost_str = ""
+            if pricing:
+                ir, or_, cwr, crr = pricing
+                total = (sus.get("uncached_input_tokens", 0) * ir +
+                         sus.get("completion_tokens", 0) * or_ +
+                         sus.get("cache_creation_tokens", 0) * (cwr or ir) +
+                         sus.get("cache_read_tokens", 0) * (crr or ir)) / 1_000_000
+                cost_str = f" ${total:.4f}"
+            cache_pct = sus.get("cache_read_tokens", 0) * 100 // max(1, sus.get("prompt_tokens", 1))
+            lines.append(f"  `{skey}`: {sus['llm_calls']} calls, "
+                         f"in={sus.get('prompt_tokens', 0):,}(cache {cache_pct}%), "
+                         f"out={sus.get('completion_tokens', 0):,}{cost_str}")
+
+    # Global usage
+    totals: dict[str, int] = {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0,
+        "cache_creation_tokens": 0, "cache_read_tokens": 0, "uncached_input_tokens": 0,
+    }
+    for sus in usage_stats.values():
+        for k in totals:
+            totals[k] += sus.get(k, 0)
+    if totals["llm_calls"] > 0:
+        lines.append("\n🌐 **Token Usage (cumulative)**")
+        lines.extend(_cost_lines(totals, prefix="  "))
+
+    if running_subagents > 0:
+        lines.append(f"\n🔄 Running subagents: {running_subagents}")
+    lines.append(f"\n📡 Active sessions: {active_sessions}")
+
+    return "\n".join(lines)
+
+
+def _build_tools(
+    workspace: Path,
+    brave_api_key: str | None,
+    exec_config: Any,
+    restrict_to_workspace: bool,
+    bus: "MessageBus | None" = None,
+    cron_service: Any = None,
+) -> ToolRegistry:
+    """Build a ToolRegistry with the standard set of tools.
+
+    Used by both AgentLoop and SubagentManager to avoid duplicating
+    the tool registration logic.
+
+    Args:
+        workspace: Agent workspace path.
+        brave_api_key: Optional Brave Search API key.
+        exec_config: ExecToolConfig instance.
+        restrict_to_workspace: Whether to restrict file ops to workspace.
+        bus: MessageBus for MessageTool (optional; omit for subagents that
+             supply their own MessageTool after calling this).
+        cron_service: Optional CronService for CronTool.
+    """
+    allowed_dir = workspace if restrict_to_workspace else None
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(allowed_dir=allowed_dir))
+    registry.register(WriteFileTool(allowed_dir=allowed_dir))
+    registry.register(EditFileTool(allowed_dir=allowed_dir))
+    registry.register(ListDirTool(allowed_dir=allowed_dir))
+    registry.register(ExecTool(
+        working_dir=str(workspace),
+        timeout=exec_config.timeout,
+        restrict_to_workspace=restrict_to_workspace,
+    ))
+    registry.register(WebSearchTool(api_key=brave_api_key))
+    registry.register(WebFetchTool())
+    if bus is not None:
+        registry.register(MessageTool(
+            send_callback=bus.publish_outbound,
+            send_and_wait=bus.send_and_wait,
+        ))
+    if cron_service is not None:
+        registry.register(CronTool(cron_service))
+    return registry
 
 
 class AgentLoop:
@@ -168,40 +314,17 @@ class AgentLoop:
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
-        """Register the default set of tools."""
-        # File tools (restrict to workspace if configured)
-        allowed_dir = self.workspace if self.restrict_to_workspace else None
-        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
-        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
-        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
-        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
-        
-        # Shell tool
-        self.tools.register(ExecTool(
-            working_dir=str(self.workspace),
-            timeout=self.exec_config.timeout,
+        """Register the default set of tools using the shared _build_tools factory."""
+        self.tools = _build_tools(
+            workspace=self.workspace,
+            brave_api_key=self.brave_api_key,
+            exec_config=self.exec_config,
             restrict_to_workspace=self.restrict_to_workspace,
-        ))
-        
-        # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
-        self.tools.register(WebFetchTool())
-        
-        # Message tool
-        message_tool = MessageTool(
-            send_callback=self.bus.publish_outbound,
-            send_and_wait=self.bus.send_and_wait,
+            bus=self.bus,
+            cron_service=self.cron_service,
         )
-        self.tools.register(message_tool)
-        
-        # Spawn tool (for subagents)
-        spawn_tool = SpawnTool(manager=self.subagents)
-        self.tools.register(spawn_tool)
-        
-        # Cron tool (for scheduling)
-        if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
-
+        # Spawn tool (only main agent has subagent manager)
+        self.tools.register(SpawnTool(manager=self.subagents))
         # Image generation tool
         self.tools.register(ImageGenTool())
     
@@ -316,149 +439,14 @@ class AgentLoop:
         stats["uncached_input_tokens"] += uncached
         # Note: caller is responsible for calling _save_usage_stats() after the loop
 
-    def _get_global_usage(self) -> dict[str, int]:
-        """Get aggregated token usage across all sessions."""
-        totals = {
-            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0,
-            "cache_creation_tokens": 0, "cache_read_tokens": 0, "uncached_input_tokens": 0,
-        }
-        for stats in self._usage_stats.values():
-            for k in totals:
-                totals[k] += stats.get(k, 0)
-        return totals
-
-    def _get_context_window(self) -> int:
-        """Get the context window size for the current model.
-
-        Matches model name against MODEL_CONTEXT_WINDOWS keys (substring match).
-        Returns DEFAULT_CONTEXT_WINDOW if no match found.
-        """
-        model_lower = (self.model or "").lower()
-        for key, window in MODEL_CONTEXT_WINDOWS.items():
-            if key in model_lower:
-                return window
-        return DEFAULT_CONTEXT_WINDOW
-
-    def _get_pricing(self) -> tuple[float, float, float | None, float | None] | None:
-        """Get pricing for the current model.
-
-        Returns (input_per_mtok, output_per_mtok, cache_write_per_mtok, cache_read_per_mtok)
-        or None if pricing is unknown.
-        """
-        model_lower = (self.model or "").lower()
-        for key, pricing in MODEL_PRICING.items():
-            if key in model_lower:
-                return pricing
-        return None
-
-    def _calculate_cost(self, stats: dict[str, int]) -> dict[str, float] | None:
-        """Calculate cost breakdown from token usage stats.
-
-        Returns dict with cost_input, cost_output, cost_cache_write, cost_cache_read, cost_total
-        or None if pricing is unknown.
-        """
-        pricing = self._get_pricing()
-        if not pricing:
-            return None
-
-        input_rate, output_rate, cache_write_rate, cache_read_rate = pricing
-
-        # Input cost: uncached tokens at full price
-        uncached = stats.get("uncached_input_tokens", 0)
-        cache_read = stats.get("cache_read_tokens", 0)
-        cache_created = stats.get("cache_creation_tokens", 0)
-        output = stats.get("completion_tokens", 0)
-
-        cost_input = uncached * input_rate / 1_000_000
-        cost_output = output * output_rate / 1_000_000
-        cost_cache_write = cache_created * (cache_write_rate or input_rate) / 1_000_000
-        cost_cache_read = cache_read * (cache_read_rate or input_rate) / 1_000_000
-        cost_total = cost_input + cost_output + cost_cache_write + cost_cache_read
-
-        return {
-            "cost_input": cost_input,
-            "cost_output": cost_output,
-            "cost_cache_write": cost_cache_write,
-            "cost_cache_read": cost_cache_read,
-            "cost_total": cost_total,
-        }
-
-    @staticmethod
-    def _strip_think(text: str | None) -> str | None:
-        """Remove <think>…</think> blocks that some models embed in content."""
-        if not text:
-            return None
-        return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
-
-    @staticmethod
-    def _tool_hint(tool_calls: list) -> str:
-        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
-        def _fmt(tc):
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
-            if not isinstance(val, str):
-                return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
-        return ", ".join(_fmt(tc) for tc in tool_calls)
-
-    @staticmethod
-    def _format_tool_detail(name: str, arguments: dict, result: str, max_lines: int = 5, verbose: bool = True) -> str:
-        """Format a complete tool call with arguments and result for user display.
-        
-        When verbose=False, returns a single-line summary.
-        """
-        if not verbose:
-            # Brief mode: single line
-            result_preview = result.replace("\n", " ").strip()
-            if len(result_preview) > 80:
-                result_preview = result_preview[:77] + "..."
-            # Show key argument (first string value or first key)
-            arg_hint = ""
-            if arguments:
-                for k, v in arguments.items():
-                    if isinstance(v, str) and len(v) < 80:
-                        arg_hint = f" {k}={v}"
-                        break
-                if not arg_hint:
-                    first_key = next(iter(arguments))
-                    val = str(arguments[first_key])
-                    if len(val) > 40:
-                        val = val[:37] + "..."
-                    arg_hint = f" {first_key}={val}"
-            return f"🔧 {name}{arg_hint} → {result_preview}"
-
-        args_str = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else "{}"
-        lines = result.splitlines()
-        if len(lines) > max_lines:
-            result_display = "\n".join(lines[:max_lines]) + f"\n... ({len(lines)} lines total, showing first {max_lines})"
-        else:
-            result_display = result
-        return f"🔧 **{name}**\n```\n{args_str}\n```\n📤 Result:\n```\n{result_display}\n```"
-
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         session: Session | None = None,
         model_override: str | None = None,
-    ) -> tuple[str | None, list[str], list[dict], bool, int, list[str]]:
-        """
-        Run the agent iteration loop.
-
-        Args:
-            initial_messages: Starting messages for the LLM conversation.
-            on_progress: Optional callback to push intermediate content to the user.
-            session: Optional session for incremental persistence. When provided,
-                     new messages are saved to disk after each LLM round so that
-                     progress is not lost on restart.
-            model_override: Optional model to use instead of self.model.
-
-        Returns:
-            Tuple of (final_content, list_of_tools_used, full_messages, hit_max, persisted_count, generated_media).
-            full_messages includes all messages from the loop (excluding system prompt).
-            hit_max is True if the loop exited because max_iterations was reached.
-            persisted_count is how many messages in full_messages were already saved to disk.
-            generated_media is a list of file paths produced by image_gen tool.
-        """
+    ) -> LoopResult:
+        """Run the agent iteration loop and return a LoopResult."""
         effective_model = model_override or self.model
         messages = initial_messages
         iteration = 0
@@ -511,7 +499,7 @@ class AgentLoop:
                 # Check if prompt tokens exceed 80% of model's context window.
                 # If so, flag the session for consolidation after this loop finishes.
                 prompt_tokens = response.usage.get("prompt_tokens", 0)
-                context_window = self._get_context_window()
+                context_window = get_context_window(self.model)
                 threshold = int(context_window * 0.8)
                 if prompt_tokens > threshold:
                     logger.warning(
@@ -532,12 +520,12 @@ class AgentLoop:
                 _show_tools = self._show_tool_calls(session) if session else self.verbose_tool_output
 
                 if on_progress:
-                    clean = self._strip_think(response.content)
+                    clean = _strip_think(response.content)
                     if clean:
                         await on_progress(clean)
                     elif _show_tools:
                         # Only send tool hint when tool display is enabled
-                        await on_progress(self._tool_hint(response.tool_calls))
+                        await on_progress(_tool_hint(response.tool_calls))
 
                 tool_call_dicts = [
                     {
@@ -566,7 +554,7 @@ class AgentLoop:
                         if os.path.isfile(path):
                             generated_media.append(path)
                     if on_progress and _show_tools:
-                        detail = self._format_tool_detail(
+                        detail = _format_tool_detail(
                             tool_call.name, tool_call.arguments, result,
                             verbose=True,
                         )
@@ -578,7 +566,7 @@ class AgentLoop:
                 # Persist after each tool-call round so progress survives restarts
                 _flush_to_session()
             else:
-                final_content = self._strip_think(response.content)
+                final_content = _strip_think(response.content)
                 # Add the final assistant reply to messages so it gets persisted
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_calls=None,
@@ -593,7 +581,14 @@ class AgentLoop:
         # Persist accumulated usage stats once after the loop (not per-call)
         self._save_usage_stats()
 
-        return final_content, tools_used, new_messages, hit_max, persisted_count, generated_media
+        return LoopResult(
+            final_content=final_content,
+            tools_used=tools_used,
+            messages=new_messages,
+            hit_max=hit_max,
+            persisted_count=persisted_count,
+            generated_media=generated_media,
+        )
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """Get or create a per-session lock to serialize messages within the same session.
@@ -800,17 +795,22 @@ class AgentLoop:
                 metadata=msg.metadata or {},
             ))
 
-        final_content, tools_used, full_messages, hit_max, persisted_count, generated_media = await self._run_agent_loop(
+        result = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
             session=session,
             model_override=model_override,
         )
+        final_content = result.final_content
+        full_messages = result.messages
+        hit_max = result.hit_max
+        persisted_count = result.persisted_count
+        generated_media = result.generated_media
 
         # Check if context-window-based consolidation was flagged during the loop
         if session and session.key in self._needs_context_consolidation:
             self._needs_context_consolidation.discard(session.key)
             prompt_tokens = self._usage_stats.get(key, {}).get("last_prompt_tokens", 0)
-            context_window = self._get_context_window()
+            context_window = get_context_window(self.model)
             pct = prompt_tokens * 100 // context_window if context_window else 0
             logger.info(
                 f"Triggering context-window consolidation for session {session.key} "
@@ -954,110 +954,17 @@ class AgentLoop:
             logger.info(f"Resumed {resumed} interrupted session(s)")
 
     def _build_status(self, session_key: str, session: Session) -> str:
-        """Build a status report string for the /status command."""
-        import time as _time
-        lines = ["🐈 **nanobot status**\n"]
-
-        # --- Uptime ---
-        if self._start_time:
-            elapsed = _time.time() - self._start_time
-            hours, rem = divmod(int(elapsed), 3600)
-            minutes, secs = divmod(rem, 60)
-            if hours > 0:
-                lines.append(f"⏱ Uptime: {hours}h {minutes}m {secs}s")
-            else:
-                lines.append(f"⏱ Uptime: {minutes}m {secs}s")
-
-        # --- Model ---
-        lines.append(f"🤖 Model: `{self.model}`")
-        context_window = self._get_context_window()
-        lines.append(f"📏 Context window: {context_window:,} tokens")
-        tools_status = "开启" if self._show_tool_calls(session) else "关闭"
-        lines.append(f"🔧 Tool call output: {tools_status}")
-
-        # --- Session info ---
-        msg_count = len(session.messages)
-        user_msgs = sum(1 for m in session.messages if m.get("role") == "user")
-        assistant_msgs = sum(1 for m in session.messages if m.get("role") == "assistant")
-        tool_msgs = sum(1 for m in session.messages if m.get("role") == "tool")
-        lines.append(f"\n📋 **Session** (`{session_key}`)")
-        lines.append(f"  Messages: {msg_count} (user: {user_msgs}, assistant: {assistant_msgs}, tool: {tool_msgs})")
-
-        # --- Session token usage ---
-        session_usage = self._usage_stats.get(session_key)
-        if session_usage:
-            lines.append(f"\n📊 **Token Usage (this session)**")
-            uncached = session_usage.get('uncached_input_tokens', 0)
-            cache_read = session_usage.get('cache_read_tokens', 0)
-            cache_created = session_usage.get('cache_creation_tokens', 0)
-            completion = session_usage['completion_tokens']
-            lines.append(f"  Input: {session_usage['prompt_tokens']:,} tokens")
-            if cache_read or cache_created:
-                lines.append(f"    ├ Uncached: {uncached:,}")
-                lines.append(f"    ├ Cache read: {cache_read:,}")
-                lines.append(f"    └ Cache write: {cache_created:,}")
-            lines.append(f"  Output: {completion:,} tokens")
-            lines.append(f"  LLM calls: {session_usage['llm_calls']}")
-            # Show last prompt tokens vs context window
-            last_prompt = session_usage.get("last_prompt_tokens", 0)
-            if last_prompt:
-                pct = last_prompt * 100 // context_window
-                bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-                lines.append(f"  Context: {last_prompt:,}/{context_window:,} ({pct}%) [{bar}]")
-            # Show cost breakdown
-            cost = self._calculate_cost(session_usage)
-            if cost:
-                lines.append(f"\n💰 **Cost (this session)**")
-                lines.append(f"  Input (uncached): ${cost['cost_input']:.4f}")
-                if cache_read or cache_created:
-                    lines.append(f"  Cache write: ${cost['cost_cache_write']:.4f}")
-                    lines.append(f"  Cache read: ${cost['cost_cache_read']:.4f}")
-                lines.append(f"  Output: ${cost['cost_output']:.4f}")
-                lines.append(f"  **Total: ${cost['cost_total']:.4f}**")
-        else:
-            lines.append(f"\n📊 **Token Usage (this session)**: no data yet")
-
-        # --- Per-session token usage breakdown ---
-        other_sessions = {k: v for k, v in self._usage_stats.items() if k != session_key and v.get("llm_calls", 0) > 0}
-        if other_sessions:
-            lines.append(f"\n📊 **Other Sessions**")
-            for skey, sus in sorted(other_sessions.items(), key=lambda x: x[1].get("total_tokens", 0), reverse=True):
-                s_cost = self._calculate_cost(sus)
-                cost_str = f" ${s_cost['cost_total']:.4f}" if s_cost else ""
-                s_cache_read = sus.get('cache_read_tokens', 0)
-                s_uncached = sus.get('uncached_input_tokens', 0)
-                cache_pct = s_cache_read * 100 // max(1, sus['prompt_tokens'])
-                lines.append(f"  `{skey}`: {sus['llm_calls']} calls, in={sus['prompt_tokens']:,}(cache {cache_pct}%), out={sus['completion_tokens']:,}{cost_str}")
-
-        # --- Global token usage ---
-        global_usage = self._get_global_usage()
-        if global_usage["llm_calls"] > 0:
-            lines.append(f"\n🌐 **Token Usage (cumulative)**")
-            g_uncached = global_usage.get('uncached_input_tokens', 0)
-            g_cache_read = global_usage.get('cache_read_tokens', 0)
-            g_cache_created = global_usage.get('cache_creation_tokens', 0)
-            lines.append(f"  Input: {global_usage['prompt_tokens']:,} tokens")
-            if g_cache_read or g_cache_created:
-                lines.append(f"    ├ Uncached: {g_uncached:,}")
-                lines.append(f"    ├ Cache read: {g_cache_read:,}")
-                lines.append(f"    └ Cache write: {g_cache_created:,}")
-            lines.append(f"  Output: {global_usage['completion_tokens']:,} tokens")
-            lines.append(f"  LLM calls: {global_usage['llm_calls']}")
-            # Global cost
-            global_cost = self._calculate_cost(global_usage)
-            if global_cost:
-                lines.append(f"  **Total cost: ${global_cost['cost_total']:.4f}**")
-
-        # --- Subagents ---
-        running_subagents = self.subagents.get_running_count()
-        if running_subagents > 0:
-            lines.append(f"\n🔄 Running subagents: {running_subagents}")
-
-        # --- Active sessions ---
-        active_sessions = len(self._session_locks)
-        lines.append(f"\n📡 Active sessions: {active_sessions}")
-
-        return "\n".join(lines)
+        """Delegate to the module-level _build_status_report helper."""
+        return _build_status_report(
+            model=self.model,
+            start_time=self._start_time,
+            session_key=session_key,
+            session=session,
+            usage_stats=self._usage_stats,
+            show_tool_calls=self._show_tool_calls(session),
+            running_subagents=self.subagents.get_running_count(),
+            active_sessions=len(self._session_locks),
+        )
 
     async def _handle_tasks_command(self, cmd: str, msg: InboundMessage) -> OutboundMessage:
         """Handle /tasks and its subcommands."""
@@ -1164,9 +1071,13 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        final_content, _, full_messages, hit_max, persisted_count, _ = await self._run_agent_loop(
+        result = await self._run_agent_loop(
             initial_messages, session=session,
         )
+        final_content = result.final_content
+        full_messages = result.messages
+        hit_max = result.hit_max
+        persisted_count = result.persisted_count
 
         if final_content is None:
             if hit_max:

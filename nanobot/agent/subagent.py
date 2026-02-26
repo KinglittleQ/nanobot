@@ -14,9 +14,6 @@ from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
-from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.utils.helpers import ensure_dir
 
@@ -288,20 +285,14 @@ class SubagentManager:
         logger.info(f"Subagent [{task_id}] starting task: {label}")
 
         try:
-            # Build subagent tools (includes message tool for progress updates)
-            tools = ToolRegistry()
-            allowed_dir = self.workspace if self.restrict_to_workspace else None
-            tools.register(ReadFileTool(allowed_dir=allowed_dir))
-            tools.register(WriteFileTool(allowed_dir=allowed_dir))
-            tools.register(EditFileTool(allowed_dir=allowed_dir))
-            tools.register(ListDirTool(allowed_dir=allowed_dir))
-            tools.register(ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
+            # Build subagent tools via shared factory (no bus/cron — subagent adds its own MessageTool below)
+            from nanobot.agent.loop import _build_tools
+            tools = _build_tools(
+                workspace=self.workspace,
+                brave_api_key=self.brave_api_key,
+                exec_config=self.exec_config,
                 restrict_to_workspace=self.restrict_to_workspace,
-            ))
-            tools.register(WebSearchTool(api_key=self.brave_api_key))
-            tools.register(WebFetchTool())
+            )
 
             # Determine thread target:
             # - If reply_to is set (user's message_id), reply under user's thread
