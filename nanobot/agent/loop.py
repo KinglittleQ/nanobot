@@ -34,6 +34,9 @@ from nanobot.session.manager import Session, SessionManager
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Claude models
     "-1m": 1_000_000,  # Any model with -1M suffix (e.g. claude-opus-4.6-cache-1M)
+    # cloudsway 1M context models (model name contains "cache" suffix, no "-1m")
+    "claude-opus-4.6-cache": 1_000_000,
+    "claude-sonnet-4.6-cache": 1_000_000,
     "claude-opus": 200_000,
     "claude-sonnet": 200_000,
     "claude-haiku": 200_000,

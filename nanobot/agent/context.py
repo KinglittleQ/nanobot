@@ -24,7 +24,29 @@ class ContextBuilder:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
-    
+        # System prompt cache: (cache_key -> prompt_str)
+        # cache_key is derived from file mtimes so changes are detected.
+        self._system_prompt_cache: dict[str, str] = {}
+
+    def _system_prompt_cache_key(self) -> str:
+        """Compute a cache key based on mtimes of all files that affect the system prompt."""
+        import os
+        mtimes = []
+        # Bootstrap files
+        for filename in self.BOOTSTRAP_FILES:
+            p = self.workspace / filename
+            if p.exists():
+                mtimes.append(f"{filename}:{p.stat().st_mtime_ns}")
+        # Memory file
+        mem_p = self.workspace / "memory" / "MEMORY.md"
+        if mem_p.exists():
+            mtimes.append(f"MEMORY.md:{mem_p.stat().st_mtime_ns}")
+        # Skills directory (check mtime of skills dir itself as a proxy)
+        skills_dir = self.workspace / "skills"
+        if skills_dir.exists():
+            mtimes.append(f"skills:{skills_dir.stat().st_mtime_ns}")
+        return "|".join(mtimes)
+
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
@@ -33,6 +55,10 @@ class ContextBuilder:
         content) so that Anthropic prompt caching can match the prefix across
         calls.  Dynamic content like current time is injected into the user
         message instead (see build_messages).
+
+        Results are cached in-process keyed by file mtimes, so repeated calls
+        within the same turn (or across turns when files haven't changed) skip
+        disk I/O and return the same string — maximising Anthropic cache hits.
         
         Args:
             skill_names: Optional list of skills to include.
@@ -40,6 +66,11 @@ class ContextBuilder:
         Returns:
             Complete system prompt.
         """
+        # Check in-process cache first
+        cache_key = self._system_prompt_cache_key()
+        if cache_key in self._system_prompt_cache:
+            return self._system_prompt_cache[cache_key]
+
         parts = []
         
         # Core identity
@@ -73,7 +104,13 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
         
-        return "\n\n---\n\n".join(parts)
+        result = "\n\n---\n\n".join(parts)
+
+        # Store in in-process cache (keyed by file mtimes)
+        # Keep cache small: evict all old entries when files change
+        self._system_prompt_cache.clear()
+        self._system_prompt_cache[cache_key] = result
+        return result
     
     def _get_identity(self) -> str:
         """Get the core identity section.

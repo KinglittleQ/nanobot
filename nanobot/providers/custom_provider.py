@@ -232,11 +232,15 @@ class CustomProvider(LLMProvider):
                 "total_tokens": u.total_tokens,
             }
             # Parse Anthropic prompt cache stats from response
+            # Anthropic via OpenAI-compat: cache_creation_input_tokens + cache_read_input_tokens
+            # OpenAI native: prompt_tokens_details.cached_tokens
             cache_created = getattr(u, "cache_creation_input_tokens", None)
-            cache_read = None
-            ptd = getattr(u, "prompt_tokens_details", None)
-            if ptd:
-                cache_read = getattr(ptd, "cached_tokens", None)
+            cache_read = getattr(u, "cache_read_input_tokens", None)
+            # Fallback: OpenAI-style cached_tokens in prompt_tokens_details
+            if not cache_read:
+                ptd = getattr(u, "prompt_tokens_details", None)
+                if ptd:
+                    cache_read = getattr(ptd, "cached_tokens", None)
             if cache_created or cache_read:
                 usage["cache_creation_input_tokens"] = cache_created or 0
                 usage["cache_read_input_tokens"] = cache_read or 0
