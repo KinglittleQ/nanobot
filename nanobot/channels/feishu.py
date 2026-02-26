@@ -179,6 +179,9 @@ class FeishuChannel(BaseChannel):
         self._bot_open_id: str | None = None  # Bot's own open_id for mention detection
         # Track message IDs sent by the bot, so we can detect thread replies
         self._bot_sent_message_ids: OrderedDict[str, None] = OrderedDict()
+        # Group chat message buffer: {chat_id: [(sender_id, sender_type, content, timestamp), ...]}
+        self._group_msg_buffer: dict[str, list[tuple[str, str, str, str]]] = {}
+        self._group_msg_buffer_size = 50  # Max messages per group to keep
     
     async def start(self) -> None:
         """Start the Feishu bot with WebSocket long connection."""
@@ -317,6 +320,49 @@ class FeishuChannel(BaseChannel):
                     if key:
                         content = content.replace(key, "").strip()
         return content
+
+    async def _buffer_group_message(self, message, sender_id: str, sender_type: str) -> None:
+        """Parse and buffer a group message for future context injection."""
+        import datetime
+        chat_id = message.chat_id
+        msg_type = message.message_type
+        try:
+            if msg_type == "text":
+                content = json.loads(message.content).get("text", "")
+            elif msg_type == "post":
+                content_json = json.loads(message.content)
+                content = _extract_post_text(content_json)
+            else:
+                content = MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
+        except Exception:
+            content = message.content or ""
+
+        if not content:
+            return
+
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        label = f"bot({sender_id[:8]})" if sender_type == "bot" else f"user({sender_id[:8]})"
+        entry = (sender_id, sender_type, content, timestamp)
+
+        buf = self._group_msg_buffer.setdefault(chat_id, [])
+        buf.append(entry)
+        if len(buf) > self._group_msg_buffer_size:
+            buf.pop(0)
+        logger.debug(f"Buffered group message from {label}: {content[:80]}")
+
+    def _get_group_history(self, chat_id: str, max_msgs: int = 20) -> str:
+        """Return recent group chat history as a formatted string, then clear buffer."""
+        buf = self._group_msg_buffer.get(chat_id, [])
+        if not buf:
+            return ""
+        recent = buf[-max_msgs:]
+        lines = []
+        for sender_id, sender_type, content, timestamp in recent:
+            label = f"bot({sender_id[:8]})" if sender_type == "bot" else f"user({sender_id[:8]})"
+            lines.append(f"[{timestamp}] {label}: {content}")
+        # Clear buffer after injecting into context
+        self._group_msg_buffer[chat_id] = []
+        return "\n".join(lines)
 
     async def stop(self) -> None:
         """Stop the Feishu bot."""
@@ -850,12 +896,13 @@ class FeishuChannel(BaseChannel):
                 return
 
             # In group chats, only RESPOND when @mentioned or in bot's thread.
-            # But we still receive and log all messages (for observation).
+            # But we still receive and buffer all messages (for context).
             if chat_type == "group" and self._bot_open_id:
                 is_mentioned = self._is_bot_mentioned(message)
                 is_thread = self._is_bot_thread(message)
                 if not is_mentioned and not is_thread:
-                    logger.debug(f"Group message observed (no reply): sender={sender_id} type={sender_type}")
+                    # Parse and buffer this message for future context
+                    await self._buffer_group_message(message, sender_id, sender_type)
                     return  # Observe only, don't reply
             
             # For bot senders, log it clearly
@@ -933,6 +980,10 @@ class FeishuChannel(BaseChannel):
                 content = self._strip_bot_mention(content, message)
                 if not content:
                     return
+                # Prepend recent group chat history as context
+                history = self._get_group_history(chat_id)
+                if history:
+                    content = f"[群聊最近消息记录]\n{history}\n---\n{content}"
             
             # Forward to message bus
             reply_to = chat_id if chat_type == "group" else sender_id
