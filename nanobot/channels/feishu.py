@@ -849,15 +849,14 @@ class FeishuChannel(BaseChannel):
                 logger.debug(f"Ignoring own bot message: {message_id}")
                 return
 
-            # In group chats, respond when:
-            # 1. Bot is @mentioned, OR
-            # 2. Message is a reply in a thread started/involving the bot
+            # In group chats, only RESPOND when @mentioned or in bot's thread.
+            # But we still receive and log all messages (for observation).
             if chat_type == "group" and self._bot_open_id:
                 is_mentioned = self._is_bot_mentioned(message)
                 is_thread = self._is_bot_thread(message)
                 if not is_mentioned and not is_thread:
-                    logger.debug(f"Ignoring group message without bot mention or thread: {message_id}")
-                    return
+                    logger.debug(f"Group message observed (no reply): sender={sender_id} type={sender_type}")
+                    return  # Observe only, don't reply
             
             # For bot senders, log it clearly
             if sender_type == "bot":
