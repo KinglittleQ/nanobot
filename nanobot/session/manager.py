@@ -137,13 +137,14 @@ class Session:
             self.messages.append(_strip_base64_images(msg))
         self.updated_at = datetime.now()
 
-    def get_history(self, max_tokens: int | None = None) -> list[dict[str, Any]]:
+    def get_history(self, max_messages: int | None = None, max_tokens: int | None = None) -> list[dict[str, Any]]:
         """Get messages in LLM format, preserving tool metadata.
 
-        If *max_tokens* is given, trim from the front so that the
+        If *max_messages* is given, only the last N messages are considered.
+        If *max_tokens* is given, further trim from the front so that the
         estimated token count (chars // 4) stays within that budget.
         """
-        recent = list(self.messages)
+        recent = self.messages[-max_messages:] if max_messages else list(self.messages)
 
         # Token-budget trimming: drop oldest messages until estimated tokens fit
         if max_tokens is not None:

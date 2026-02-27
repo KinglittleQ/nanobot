@@ -161,7 +161,7 @@ def _make_cron_callback(agent: "AgentLoop", bus: "MessageBus", session_manager: 
         if job.payload.deliver and job.payload.channel and job.payload.to:
             main_session_key = f"{job.payload.channel}:{job.payload.to}"
             main_session = session_manager.get_or_create(main_session_key)
-            recent = main_session.get_history()[-16:]
+            recent = main_session.get_history(max_messages=16)
             if recent:
                 context_lines = []
                 for m in recent:
