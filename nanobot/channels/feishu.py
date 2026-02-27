@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import threading
 from collections import OrderedDict
@@ -774,8 +775,6 @@ class FeishuChannel(BaseChannel):
             return
 
         try:
-            import os
-
             # Determine receive_id_type based on chat_id format
             if msg.chat_id.startswith("oc_"):
                 receive_id_type = "chat_id"
