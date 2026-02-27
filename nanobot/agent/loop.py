@@ -264,6 +264,8 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         max_concurrent_sessions: int = 5,
+        model_context_windows: dict | None = None,
+        model_pricing: dict | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -281,6 +283,8 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self._model_context_windows: dict = model_context_windows or {}
+        self._model_pricing: dict = model_pricing or {}
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -498,7 +502,7 @@ class AgentLoop:
                 # Check if prompt tokens exceed 80% of model's context window.
                 # If so, flag the session for consolidation after this loop finishes.
                 prompt_tokens = response.usage.get("prompt_tokens", 0)
-                context_window = get_context_window(self.model, self._config.model_context_windows)
+                context_window = get_context_window(self.model, self._model_context_windows)
                 threshold = int(context_window * 0.8)
                 if prompt_tokens > threshold:
                     logger.warning(
@@ -779,7 +783,7 @@ class AgentLoop:
         self._set_tool_context(msg.channel, msg.chat_id, sender_id=msg.sender_id, reply_to=_reply_to)
         initial_messages = self.context.build_messages(
             history=session.get_history(
-                max_tokens=int(get_context_window(self.model, self._config.model_context_windows) * 0.70),
+                max_tokens=int(get_context_window(self.model, self._model_context_windows) * 0.70),
             ),
             current_message=msg.content,
             media=msg.media if msg.media else None,
@@ -811,7 +815,7 @@ class AgentLoop:
         if session and session.key in self._needs_context_consolidation:
             self._needs_context_consolidation.discard(session.key)
             prompt_tokens = self._usage_stats.get(key, {}).get("last_prompt_tokens", 0)
-            context_window = get_context_window(self.model, self._config.model_context_windows)
+            context_window = get_context_window(self.model, self._model_context_windows)
             pct = prompt_tokens * 100 // context_window if context_window else 0
             logger.info(
                 f"Triggering context-window consolidation for session {session.key} "
@@ -965,8 +969,8 @@ class AgentLoop:
             show_tool_calls=self._show_tool_calls(session),
             running_subagents=self.subagents.get_running_count(),
             active_sessions=len(self._session_locks),
-            model_context_windows=self._config.model_context_windows,
-            model_pricing=self._config.model_pricing,
+            model_context_windows=self._model_context_windows,
+            model_pricing=self._model_pricing,
         )
 
     async def _handle_tasks_command(self, cmd: str, msg: InboundMessage) -> OutboundMessage:
@@ -1070,7 +1074,7 @@ class AgentLoop:
         self._set_tool_context(origin_channel, origin_chat_id)
         initial_messages = self.context.build_messages(
             history=session.get_history(
-                max_tokens=int(get_context_window(self.model, self._config.model_context_windows) * 0.70),
+                max_tokens=int(get_context_window(self.model, self._model_context_windows) * 0.70),
             ),
             current_message=f"[System: {msg.sender_id}] {msg.content}",
             channel=origin_channel,

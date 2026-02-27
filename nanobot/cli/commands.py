@@ -316,6 +316,8 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
+        model_context_windows=config.model_context_windows,
+        model_pricing=config.model_pricing,
     )
     
     # Set cron callback (needs agent)
@@ -513,6 +515,8 @@ def agent(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
+        model_context_windows=config.model_context_windows,
+        model_pricing=config.model_pricing,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
