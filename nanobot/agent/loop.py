@@ -855,8 +855,8 @@ class AgentLoop:
         if final_content is None:
             if hit_max:
                 final_content = "⚠️ 达到最大迭代次数，任务可能未完成。"
-            elif result.tools_used:
-                # Already responded via tool calls (e.g. message tool), no extra reply needed
+            elif "message" in result.tools_used:
+                # Already responded via message tool, no extra reply needed
                 self._save_remaining(session, full_messages, persisted_count)
                 return None
             else:
