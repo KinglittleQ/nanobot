@@ -30,7 +30,7 @@ def get_context_window(model: str, model_config: dict[str, int] | None = None) -
     """
     if model_config:
         model_lower = model.lower()
-        for key, window in model_config.items():
+        for key, window in sorted(model_config.items(), key=lambda x: -len(x[0])):
             if key.lower() in model_lower:
                 return window
     return DEFAULT_CONTEXT_WINDOW
@@ -47,7 +47,7 @@ def get_pricing(
     """
     if pricing_config:
         model_lower = model.lower()
-        for key, prices in pricing_config.items():
+        for key, prices in sorted(pricing_config.items(), key=lambda x: -len(x[0])):
             if key.lower() in model_lower:
                 if len(prices) >= 4:
                     return (prices[0], prices[1], prices[2], prices[3])

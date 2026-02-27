@@ -154,7 +154,7 @@ class CustomProvider(LLMProvider):
             if messages[i].get("role") == "user":
                 last_user_idx = i
                 break
-        if last_user_idx and last_user_idx >= 2:
+        if last_user_idx and last_user_idx >= 1:
             bp2_idx = last_user_idx - 1
             messages[bp2_idx] = _mark(messages[bp2_idx])
 
@@ -237,7 +237,7 @@ class CustomProvider(LLMProvider):
             cache_created = getattr(u, "cache_creation_input_tokens", None)
             cache_read = getattr(u, "cache_read_input_tokens", None)
             # Fallback: OpenAI-style cached_tokens in prompt_tokens_details
-            if not cache_read:
+            if cache_read is None:
                 ptd = getattr(u, "prompt_tokens_details", None)
                 if ptd:
                     cache_read = getattr(ptd, "cached_tokens", None)

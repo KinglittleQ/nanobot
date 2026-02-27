@@ -133,7 +133,7 @@ class Session:
         now = datetime.now().isoformat()
         for msg in messages:
             if "timestamp" not in msg:
-                msg["timestamp"] = now
+                msg = {**msg, "timestamp": now}
             self.messages.append(_strip_base64_images(msg))
         self.updated_at = datetime.now()
 
