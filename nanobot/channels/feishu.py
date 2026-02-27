@@ -999,10 +999,15 @@ class FeishuChannel(BaseChannel):
                 content = self._strip_bot_mention(content, message)
                 if not content:
                     return
+                # Resolve other @mentions to real open_id
+                content = self._resolve_mentions(content, message)
                 # Prepend recent group chat history as context
                 history = self._get_group_history(chat_id)
                 if history:
                     content = f"[群聊最近消息记录]\n{history}\n---\n{content}"
+            else:
+                # Also resolve mentions in P2P messages
+                content = self._resolve_mentions(content, message)
             
             # Forward to message bus
             reply_to = chat_id if chat_type == "group" else sender_id
@@ -1024,6 +1029,14 @@ class FeishuChannel(BaseChannel):
                 media=media_files if media_files else None,
                 metadata=msg_metadata,
             )
-            
+
+            # Cleanup downloaded temp files after agent has processed them
+            for path in media_files:
+                try:
+                    import os as _os
+                    _os.unlink(path)
+                except OSError:
+                    pass
+
         except Exception as e:
             logger.error(f"Error processing Feishu message: {e}")

@@ -396,8 +396,8 @@ def gateway(
                         # Explicit single target (backward compatible)
                         targets.append((notify.channel, notify.chat_id))
                     else:
-                        # Default: only notify the admin user, don't broadcast to all sessions
-                        targets.append(("feishu", "ou_4ab6c4916575f4780a9c69310e5d3e97"))
+                        # No target configured, skip notification
+                        pass
 
                     for ch, cid in targets:
                         # Skip non-user channels (cron, heartbeat, system)
@@ -489,6 +489,7 @@ def agent(
     
     bus = MessageBus()
     provider = _make_provider(config)
+    session_manager = SessionManager(config.workspace_path)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -517,6 +518,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         model_context_windows=config.model_context_windows,
         model_pricing=config.model_pricing,
+        session_manager=session_manager,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
