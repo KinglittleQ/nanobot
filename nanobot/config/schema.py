@@ -127,6 +127,8 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    model_context_windows: dict[str, int] = Field(default_factory=dict)
+    model_pricing: dict[str, list[float]] = Field(default_factory=dict)
 
     @property
     def workspace_path(self) -> Path:
