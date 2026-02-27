@@ -154,8 +154,8 @@ def _build_status_report(
     others = {k: v for k, v in usage_stats.items() if k != session_key and v.get("llm_calls", 0) > 0}
     if others:
         lines.append("\n📊 **Other Sessions**")
+        pricing = get_pricing(model, model_pricing)
         for skey, sus in sorted(others.items(), key=lambda x: x[1].get("total_tokens", 0), reverse=True):
-            pricing = get_pricing(model, model_pricing)
             cost_str = ""
             if pricing:
                 ir, or_, cwr, crr = pricing
@@ -559,7 +559,6 @@ class AgentLoop:
                     if on_progress and _show_tools:
                         detail = _format_tool_detail(
                             tool_call.name, tool_call.arguments, result,
-                
                         )
                         await on_progress(detail)
                     messages = self.context.add_tool_result(
