@@ -143,6 +143,10 @@ class Session:
         If *max_messages* is given, only the last N messages are considered.
         If *max_tokens* is given, further trim from the front so that the
         estimated token count (chars // 4) stays within that budget.
+
+        The cut-off point may land in the middle of a tool_use / tool_result
+        group, leaving orphaned messages that would cause a 400 error from
+        Claude. We sanitize the result to remove any such orphans.
         """
         recent = self.messages[-max_messages:] if max_messages else list(self.messages)
 
