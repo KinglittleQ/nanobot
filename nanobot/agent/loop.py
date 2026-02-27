@@ -285,6 +285,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self._model_context_windows: dict = model_context_windows or {}
         self._model_pricing: dict = model_pricing or {}
+        self._background_tasks: set[asyncio.Task] = set()
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -502,7 +503,7 @@ class AgentLoop:
                 # Check if prompt tokens exceed 80% of model's context window.
                 # If so, flag the session for consolidation after this loop finishes.
                 prompt_tokens = response.usage.get("prompt_tokens", 0)
-                context_window = get_context_window(self.model, self._model_context_windows)
+                context_window = get_context_window(effective_model, self._model_context_windows)
                 threshold = int(context_window * 0.8)
                 if prompt_tokens > threshold:
                     logger.warning(
@@ -605,7 +606,7 @@ class AgentLoop:
     def _release_session_lock(self, session_key: str) -> None:
         """Remove a session lock if it is no longer in use (not locked, no waiters)."""
         lock = self._session_locks.get(session_key)
-        if lock and not lock.locked():
+        if lock and not lock.locked() and not getattr(lock, "_waiters", None):
             self._session_locks.pop(session_key, None)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
@@ -740,7 +741,9 @@ class AgentLoop:
                 temp_session.messages = messages_to_archive
                 await self._consolidate_memory(temp_session, archive_all=True)
 
-            asyncio.create_task(_consolidate_and_cleanup())
+            task = asyncio.create_task(_consolidate_and_cleanup())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started. Memory consolidation in progress.")
         if cmd == "/help":
@@ -814,7 +817,7 @@ class AgentLoop:
         if session and session.key in self._needs_context_consolidation:
             self._needs_context_consolidation.discard(session.key)
             prompt_tokens = self._usage_stats.get(key, {}).get("last_prompt_tokens", 0)
-            context_window = get_context_window(self.model, self._model_context_windows)
+            context_window = get_context_window(model_override or self.model, self._model_context_windows)
             pct = prompt_tokens * 100 // context_window if context_window else 0
             logger.info(
                 f"Triggering context-window consolidation for session {session.key} "
@@ -852,12 +855,13 @@ class AgentLoop:
         if final_content is None:
             if hit_max:
                 final_content = "⚠️ 达到最大迭代次数，任务可能未完成。"
-            else:
+            elif result.tools_used:
                 # Already responded via tool calls (e.g. message tool), no extra reply needed
-                # Intermediate messages were already saved incrementally by _run_agent_loop.
-                # Save any remaining unsaved messages (e.g. final assistant message).
                 self._save_remaining(session, full_messages, persisted_count)
                 return None
+            else:
+                # LLM returned empty content with no tool calls — send fallback
+                final_content = "（无响应）"
         
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
