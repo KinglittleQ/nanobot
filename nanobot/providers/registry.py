@@ -19,7 +19,7 @@ from typing import Any
 # Model catalog helpers — context window and pricing from config
 # ---------------------------------------------------------------------------
 
-DEFAULT_CONTEXT_WINDOW = 32_000  # Conservative fallback if not in config
+DEFAULT_CONTEXT_WINDOW = 128_000  # Conservative fallback if not in config
 
 
 def get_context_window(model: str, model_config: dict[str, int] | None = None) -> int:
@@ -51,6 +51,8 @@ def get_pricing(
             if key.lower() in model_lower:
                 if len(prices) >= 4:
                     return (prices[0], prices[1], prices[2], prices[3])
+                elif len(prices) == 3:
+                    return (prices[0], prices[1], prices[2], None)
                 elif len(prices) == 2:
                     return (prices[0], prices[1], None, None)
     return None

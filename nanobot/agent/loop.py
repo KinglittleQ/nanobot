@@ -559,7 +559,7 @@ class AgentLoop:
                     if on_progress and _show_tools:
                         detail = _format_tool_detail(
                             tool_call.name, tool_call.arguments, result,
-                            verbose=True,
+                
                         )
                         await on_progress(detail)
                     messages = self.context.add_tool_result(
