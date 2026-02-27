@@ -77,6 +77,7 @@ class SubagentManager:
         """Save the task registry to disk atomically."""
         import os
         import tempfile
+        tmp_path = None
         try:
             fd, tmp_path = tempfile.mkstemp(
                 dir=str(self._store_dir), suffix=".tmp"
@@ -85,10 +86,11 @@ class SubagentManager:
                 json.dump({"tasks": self._registry}, f, indent=2, ensure_ascii=False)
             os.replace(tmp_path, str(self._registry_path))
         except BaseException as e:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
             logger.warning(f"Failed to save subagent registry: {e}")
 
     def _update_task(self, task_id: str, persist: bool = True, **fields: Any) -> None:
@@ -140,7 +142,7 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
-        reply_to: str = "",
+        reply_to: str | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
@@ -279,7 +281,7 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
-        reply_to: str = "",
+        reply_to: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info(f"Subagent [{task_id}] starting task: {label}")

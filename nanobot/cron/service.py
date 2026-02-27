@@ -182,13 +182,19 @@ class CronService:
             self._timer_task = None
     
     def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
+        """Recompute next run times for all enabled jobs on startup.
+
+        For jobs with a persisted next_run_at_ms that is still in the future,
+        keep it as-is to avoid skipping scheduled runs after restart.
+        """
         if not self._store:
             return
         now = _now_ms()
         for job in self._store.jobs:
             if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+                # Keep persisted future run time; only recompute if missing or past
+                if not job.state.next_run_at_ms or job.state.next_run_at_ms <= now:
+                    job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
     
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
